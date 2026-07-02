@@ -1,0 +1,29 @@
+# Environment variables (private)
+.env
+
+# Python cache and byte-compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Streamlit specific
+.streamlit/secrets.toml
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Test generated documents (from verify_docs.py)
+verify_cotiz_test.docx
+verify_cotiz_test.pdf
+
+# Exports directory (contains weekly downloads)
+exports/*
+!exports/.gitkeep
