@@ -18,14 +18,14 @@ def get_supabase_client() -> Client:
     
     # 2. Fallback to Environment Variables
     if not url:
-        url = os.getenv("SUPABASE_URL") or os.getenv("EXPO_PUBLIC_SUPABASE_URL")
+        url = os.getenv("SUPABASE_URL") or os.getenv("EXPO_PUBLIC_SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
     if not key:
-        key = os.getenv("SUPABASE_KEY") or os.getenv("EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY")
+        key = os.getenv("SUPABASE_KEY") or os.getenv("EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY") or os.getenv("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY")
         
     if not url or not key:
         raise ValueError(
-            "Supabase credentials not found. Please configure SUPABASE_URL/EXPO_PUBLIC_SUPABASE_URL "
-            "and SUPABASE_KEY/EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY in your .env file or Streamlit Secrets."
+            "Supabase credentials not found. Please configure Supabase variables (SUPABASE_URL, EXPO_PUBLIC_SUPABASE_URL, or NEXT_PUBLIC_SUPABASE_URL) "
+            "and keys in your .env file or Streamlit Secrets."
         )
         
     return create_client(url, key)
