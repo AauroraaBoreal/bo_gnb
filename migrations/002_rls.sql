@@ -39,6 +39,10 @@ CREATE POLICY "Allow read to authenticated users" ON profiles
 CREATE POLICY "Allow write to admins" ON profiles
   FOR ALL TO authenticated USING (get_current_user_role() = 'admin');
 
+CREATE POLICY "Allow insert for self during signup" ON profiles
+  FOR INSERT TO authenticated WITH CHECK (auth.uid() = id);
+
+
 -- 2. EMPLOYEES Policies
 CREATE POLICY "Allow read to all authenticated" ON employees
   FOR SELECT TO authenticated USING (true);

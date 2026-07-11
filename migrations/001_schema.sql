@@ -301,3 +301,30 @@ CREATE INDEX IF NOT EXISTS idx_payroll_days_entry ON payroll_days(payroll_entry_
 CREATE INDEX IF NOT EXISTS idx_quotations_client ON quotations(client_id);
 CREATE INDEX IF NOT EXISTS idx_quotations_number_year ON quotations(quotation_number, quotation_year);
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
+
+-- --- AUTOMATIC USER PROFILE TRIGGER ---
+-- Automatically insert a row into profiles when a new user signs up in auth.users
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, full_name, role, active)
+  VALUES (
+    NEW.id,
+    NEW.email,
+    COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.email),
+    'admin', -- default role so the user has immediate admin access
+    true
+  )
+  ON CONFLICT (id) DO UPDATE
+  SET email = EXCLUDED.email,
+      full_name = COALESCE(EXCLUDED.full_name, profiles.full_name);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Trigger to execute the function on auth.users insert
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
