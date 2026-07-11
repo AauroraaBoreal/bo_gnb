@@ -13,8 +13,14 @@ def get_supabase_client() -> Client:
     Reads credentials from Streamlit secrets (for Cloud deployment) or from environment variables (local development).
     """
     # 1. Try to read from Streamlit Secrets
-    url = st.secrets.get("SUPABASE_URL")
-    key = st.secrets.get("SUPABASE_KEY")
+    url = None
+    key = None
+    try:
+        url = st.secrets.get("SUPABASE_URL")
+        key = st.secrets.get("SUPABASE_KEY")
+    except Exception:
+        # st.secrets raises an exception if no secrets.toml exists at all
+        pass
     
     # 2. Fallback to Environment Variables
     if not url:
