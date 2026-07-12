@@ -7,7 +7,7 @@ from lib.auth import auth_gate, check_permission
 from lib.supabase_client import get_supabase_client
 from lib.payroll_service import (
     create_payroll_period, save_payroll_draft, close_payroll, 
-    mark_payroll_as_paid, calculate_payroll_totals
+    mark_payroll_as_paid, calculate_payroll_totals, calculate_employee_totals
 )
 from lib.document_service import export_payroll_excel, export_payroll_pdf, upload_document_to_supabase_storage
 from lib.excel_importer import parse_and_import_excel_payroll
@@ -26,6 +26,148 @@ st.markdown("---")
 user = st.session_state.user
 can_write = check_permission(["admin", "jefe"])
 supabase = get_supabase_client()
+
+# Callbacks for st.data_editor auto-save
+def save_matrix_changes():
+    editor_state = st.session_state.get("payroll_matrix_editor")
+    if not editor_state:
+        return
+        
+    edited_rows = editor_state.get("edited_rows", {})
+    if not edited_rows:
+        return
+        
+    matrix_df = st.session_state.get("current_matrix_df")
+    if matrix_df is None or matrix_df.empty:
+        return
+        
+    client = get_supabase_client()
+    
+    updated_any = False
+    for idx_str, changes in edited_rows.items():
+        idx = int(idx_str)
+        if idx >= len(matrix_df):
+            continue
+        entry_id = matrix_df.iloc[idx]["id"]
+        
+        # 1. Update daily hours if any daily hour was changed
+        day_names = ["Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo", "Lunes"]
+        for day in day_names:
+            if day in changes:
+                hours = float(changes[day])
+                day_name_lower = day.lower()
+                client.table("payroll_days") \
+                    .update({"hours_worked": hours}) \
+                    .eq("payroll_entry_id", entry_id) \
+                    .eq("day_name", day_name_lower) \
+                    .execute()
+                updated_any = True
+                
+        # 2. Update entry notes if changed
+        if "Observación" in changes:
+            notes = changes["Observación"]
+            client.table("payroll_entries") \
+                .update({"notes": notes}) \
+                .eq("id", entry_id) \
+                .execute()
+            updated_any = True
+            
+        if updated_any:
+            calculate_employee_totals(entry_id)
+            
+    if updated_any:
+        calculate_payroll_totals(st.session_state["active_period_id"])
+
+def save_payments_changes():
+    editor_state = st.session_state.get("payroll_payments_editor")
+    if not editor_state:
+        return
+        
+    edited_rows = editor_state.get("edited_rows", {})
+    if not edited_rows:
+        return
+        
+    pay_df = st.session_state.get("current_pay_df")
+    if pay_df is None or pay_df.empty:
+        return
+        
+    client = get_supabase_client()
+    
+    updated_any = False
+    for idx_str, changes in edited_rows.items():
+        idx = int(idx_str)
+        if idx >= len(pay_df):
+            continue
+        entry_id = pay_df.iloc[idx]["id"]
+        
+        # 1. Update Descuento/Ajuste if changed
+        if "Descuento / Ajuste" in changes:
+            new_adj_amount = float(changes["Descuento / Ajuste"])
+            
+            # Find sum of other (non-manual) adjustments
+            all_adjs = client.table("payroll_adjustments") \
+                .select("id, amount, description") \
+                .eq("payroll_entry_id", entry_id) \
+                .execute().data
+                
+            non_manual_sum = sum(float(a["amount"]) for a in all_adjs if a["description"] != "Ajuste Directo")
+            manual_adjustment_needed = new_adj_amount - non_manual_sum
+            
+            # Find if there is an existing manual adjustment
+            manual_adj = [a for a in all_adjs if a["description"] == "Ajuste Directo"]
+            
+            if manual_adj:
+                manual_adj_id = manual_adj[0]["id"]
+                if manual_adjustment_needed == 0.0:
+                    client.table("payroll_adjustments").delete().eq("id", manual_adj_id).execute()
+                else:
+                    adj_type = "descuento" if manual_adjustment_needed < 0 else "bono"
+                    client.table("payroll_adjustments").update({
+                        "amount": manual_adjustment_needed,
+                        "adjustment_type": adj_type
+                    }).eq("id", manual_adj_id).execute()
+            else:
+                if manual_adjustment_needed != 0.0:
+                    adj_type = "descuento" if manual_adjustment_needed < 0 else "bono"
+                    client.table("payroll_adjustments").insert({
+                        "payroll_entry_id": entry_id,
+                        "adjustment_type": adj_type,
+                        "amount": manual_adjustment_needed,
+                        "description": "Ajuste Directo"
+                    }).execute()
+            
+            calculate_employee_totals(entry_id)
+            updated_any = True
+            
+        # 2. Update Pagado (payment_status) if changed
+        if "Pagado" in changes:
+            is_paid = bool(changes["Pagado"])
+            status_str = "pagado" if is_paid else "pendiente"
+            client.table("payroll_entries") \
+                .update({"payment_status": status_str}) \
+                .eq("id", entry_id) \
+                .execute()
+            
+            if is_paid:
+                existing_payment = client.table("payroll_payments") \
+                    .select("id") \
+                    .eq("payroll_entry_id", entry_id) \
+                    .execute().data
+                if not existing_payment:
+                    entry_data = client.table("payroll_entries").select("net_total, payment_method_snapshot").eq("id", entry_id).execute().data[0]
+                    client.table("payroll_payments").insert({
+                        "payroll_entry_id": entry_id,
+                        "paid_amount": float(entry_data["net_total"]),
+                        "payment_method": entry_data["payment_method_snapshot"],
+                        "status": "completado"
+                    }).execute()
+            else:
+                client.table("payroll_payments").delete().eq("payroll_entry_id", entry_id).execute()
+                
+            updated_any = True
+            
+    if updated_any:
+        calculate_payroll_totals(st.session_state["active_period_id"])
 
 # Fetch all periods to populate selectors
 try:
@@ -113,6 +255,15 @@ with tab_active:
             st.markdown(f"### 📂 {period['title']}")
             st.markdown(f"**Fecha Pago:** {period['payment_date']} | **Estado:** `{period['status'].upper()}`")
             
+            # Display KPIs for the active period
+            kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
+            with kpi_col1:
+                st.metric("Total Bruto", format_currency(float(period["total_gross"])))
+            with kpi_col2:
+                st.metric("Total Ajustes / Descuentos", format_currency(float(period["total_adjustments"])))
+            with kpi_col3:
+                st.metric("Total Neto Planilla", format_currency(float(period["total_net"])))
+            
             # Load Entries
             entries = supabase.table("payroll_entries") \
                 .select("*") \
@@ -155,6 +306,9 @@ with tab_active:
                 
                 st.markdown("#### Matriz de Asistencia (Horas Trabajadas)")
                 
+                # Store matrix in session state for callback reference
+                st.session_state["current_matrix_df"] = df_matrix
+                
                 # Data Editor
                 edited_df = st.data_editor(
                     df_matrix,
@@ -177,139 +331,129 @@ with tab_active:
                     },
                     hide_index=True,
                     use_container_width=True,
-                    key="payroll_matrix_editor"
+                    key="payroll_matrix_editor",
+                    on_change=save_matrix_changes
                 )
                 
-                # Save button
+                # Recalculate button
                 if is_editable:
-                    if st.button("💾 Guardar Asistencia y Calcular Pagos", use_container_width=True):
-                        # Convert edited dataframe back to inputs dict
-                        entries_hours = {}
-                        for _, row in edited_df.iterrows():
-                            entries_hours[row["id"]] = {
-                                "martes": row["Martes"],
-                                "miercoles": row["Miercoles"],
-                                "jueves": row["Jueves"],
-                                "viernes": row["Viernes"],
-                                "sabado": row["Sabado"],
-                                "domingo": row["Domingo"],
-                                "lunes": row["Lunes"],
-                                "notes": row["Observación"]
-                            }
+                    if st.button("🔄 Recalcular y Sincronizar Totales", use_container_width=True):
                         try:
-                            with st.spinner("Guardando y calculando..."):
-                                save_payroll_draft(period["id"], entries_hours, user["id"])
-                            st.success("¡Planilla guardada y recalculada con éxito!")
+                            with st.spinner("Actualizando planilla..."):
+                                for entry in entries:
+                                    calculate_employee_totals(entry["id"])
+                                calculate_payroll_totals(period["id"])
+                            st.success("Planilla recalculada y sincronizada.")
                             st.rerun()
                         except Exception as e:
-                            st.error(f"Error al guardar: {str(e)}")
+                            st.error(f"Error al recalcular: {str(e)}")
                             
                 # --- Adjustments & Discounts Block ---
                 st.markdown("---")
-                col_adj_add, col_adj_list = st.columns([1, 2])
-                
-                with col_adj_add:
-                    st.markdown("#### ➕ Registrar Ajuste / Descuento")
-                    if is_editable:
-                        # Select employee from entry list
-                        emp_options = {e["id"]: e["employee_name_snapshot"] for e in entries}
-                        adj_entry_id = st.selectbox(
-                            "Trabajador:",
-                            options=list(emp_options.keys()),
-                            format_func=lambda x: emp_options[x]
-                        )
-                        
-                        adj_type = st.selectbox(
-                            "Tipo Ajuste:",
-                            options=["descuento", "adelanto", "bono", "sctr", "deposito", "otro"],
-                            format_func=lambda x: x.upper()
-                        )
-                        
-                        adj_amount = st.number_input(
-                            "Monto (S/):", 
-                            min_value=0.0, 
-                            value=0.0, 
-                            step=10.0,
-                            help="Ingrese el monto positivo. Descuentos y adelantos se restarán automáticamente en la base de datos."
-                        )
-                        
-                        adj_desc = st.text_input("Descripción / Motivo:", placeholder="Adelanto semanal, bono especial, etc.")
-                        
-                        if st.button("Registrar Ajuste", use_container_width=True):
-                            if adj_amount <= 0:
-                                st.error("Monto debe ser mayor a cero.")
-                            elif not adj_desc:
-                                st.error("Por favor ingrese una descripción.")
-                            else:
-                                # Descuento/Adelanto are stored negative, Bonos/Depositos positive
-                                stored_amount = -adj_amount if adj_type in ("descuento", "adelanto") else adj_amount
-                                
-                                adj_payload = {
-                                    "payroll_entry_id": adj_entry_id,
-                                    "adjustment_type": adj_type,
-                                    "amount": stored_amount,
-                                    "description": adj_desc
-                                }
-                                try:
-                                    supabase.table("payroll_adjustments").insert(adj_payload).execute()
-                                    # Recalculate employee totals and period totals
-                                    supabase.table("payroll_entries").select("*").eq("id", adj_entry_id).execute()
-                                    from lib.payroll_service import calculate_employee_totals
-                                    calculate_employee_totals(adj_entry_id)
-                                    calculate_payroll_totals(period["id"])
+                with st.expander("➕ Registro de Ajustes Avanzados / Detallados (Opcional)"):
+                    col_adj_add, col_adj_list = st.columns([1, 2])
+                    
+                    with col_adj_add:
+                        st.markdown("#### ➕ Registrar Ajuste / Descuento")
+                        if is_editable:
+                            # Select employee from entry list
+                            emp_options = {e["id"]: e["employee_name_snapshot"] for e in entries}
+                            adj_entry_id = st.selectbox(
+                                "Trabajador:",
+                                options=list(emp_options.keys()),
+                                format_func=lambda x: emp_options[x]
+                            )
+                            
+                            adj_type = st.selectbox(
+                                "Tipo Ajuste:",
+                                options=["descuento", "adelanto", "bono", "sctr", "deposito", "otro"],
+                                format_func=lambda x: x.upper()
+                            )
+                            
+                            adj_amount = st.number_input(
+                                "Monto (S/):", 
+                                min_value=0.0, 
+                                value=0.0, 
+                                step=10.0,
+                                help="Ingrese el monto positivo. Descuentos y adelantos se restarán automáticamente en la base de datos."
+                            )
+                            
+                            adj_desc = st.text_input("Descripción / Motivo:", placeholder="Adelanto semanal, bono especial, etc.")
+                            
+                            if st.button("Registrar Ajuste", use_container_width=True):
+                                if adj_amount <= 0:
+                                    st.error("Monto debe ser mayor a cero.")
+                                elif not adj_desc:
+                                    st.error("Por favor ingrese una descripción.")
+                                else:
+                                    # Descuento/Adelanto are stored negative, Bonos/Depositos positive
+                                    stored_amount = -adj_amount if adj_type in ("descuento", "adelanto") else adj_amount
                                     
-                                    st.success("Ajuste registrado.")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"Error: {str(e)}")
-                    else:
-                        st.info("La planilla no está en estado Borrador o no tiene permisos de edición.")
-                        
-                with col_adj_list:
-                    st.markdown("#### 🔍 Ajustes Registrados")
-                    # Fetch all adjustments for these entries
-                    entry_ids = [e["id"] for e in entries]
-                    try:
-                        adjustments = supabase.table("payroll_adjustments") \
-                            .select("*, payroll_entries(employee_name_snapshot)") \
-                            .in_("payroll_entry_id", entry_ids) \
-                            .execute().data
-                            
-                        if adjustments:
-                            adj_rows = []
-                            for adj in adjustments:
-                                adj_rows.append({
-                                    "ID": adj["id"],
-                                    "Trabajador": adj["payroll_entries"]["employee_name_snapshot"],
-                                    "Tipo": adj["adjustment_type"].upper(),
-                                    "Monto": format_currency(float(adj["amount"])),
-                                    "Descripción": adj["description"]
-                                })
-                            df_adj = pd.DataFrame(adj_rows)
-                            
-                            # Display adjustments
-                            st.dataframe(df_adj.drop(columns=["ID"]), use_container_width=True, hide_index=True)
-                            
-                            # Option to delete adjustments
-                            if is_editable:
-                                adj_to_delete = st.selectbox(
-                                    "Eliminar Ajuste:", 
-                                    options=adjustments,
-                                    format_func=lambda x: f"{x['payroll_entries']['employee_name_snapshot']} - {x['adjustment_type'].upper()} ({format_currency(float(x['amount']))})"
-                                )
-                                if st.button("🗑️ Eliminar Ajuste Seleccionado"):
+                                    adj_payload = {
+                                        "payroll_entry_id": adj_entry_id,
+                                        "adjustment_type": adj_type,
+                                        "amount": stored_amount,
+                                        "description": adj_desc
+                                    }
                                     try:
-                                        supabase.table("payroll_adjustments").delete().eq("id", adj_to_delete["id"]).execute()
-                                        calculate_employee_totals(adj_to_delete["payroll_entry_id"])
+                                        supabase.table("payroll_adjustments").insert(adj_payload).execute()
+                                        # Recalculate employee totals and period totals
+                                        supabase.table("payroll_entries").select("*").eq("id", adj_entry_id).execute()
+                                        calculate_employee_totals(adj_entry_id)
                                         calculate_payroll_totals(period["id"])
-                                        st.success("Ajuste eliminado.")
+                                        
+                                        st.success("Ajuste registrado.")
                                         st.rerun()
                                     except Exception as e:
-                                        st.error(str(e))
+                                        st.error(f"Error: {str(e)}")
                         else:
-                            st.info("No hay ajustes registrados para esta semana.")
-                    except Exception as e:
-                        st.error(f"Error al cargar ajustes: {str(e)}")
+                            st.info("La planilla no está en estado Borrador o no tiene permisos de edición.")
+                            
+                    with col_adj_list:
+                        st.markdown("#### 🔍 Ajustes Registrados")
+                        # Fetch all adjustments for these entries
+                        entry_ids = [e["id"] for e in entries]
+                        try:
+                            adjustments = supabase.table("payroll_adjustments") \
+                                .select("*, payroll_entries(employee_name_snapshot)") \
+                                .in_("payroll_entry_id", entry_ids) \
+                                .execute().data
+                                
+                            if adjustments:
+                                adj_rows = []
+                                for adj in adjustments:
+                                    adj_rows.append({
+                                        "ID": adj["id"],
+                                        "Trabajador": adj["payroll_entries"]["employee_name_snapshot"],
+                                        "Tipo": adj["adjustment_type"].upper(),
+                                        "Monto": format_currency(float(adj["amount"])),
+                                        "Descripción": adj["description"]
+                                    })
+                                df_adj = pd.DataFrame(adj_rows)
+                                
+                                # Display adjustments
+                                st.dataframe(df_adj.drop(columns=["ID"]), use_container_width=True, hide_index=True)
+                                
+                                # Option to delete adjustments
+                                if is_editable:
+                                    adj_to_delete = st.selectbox(
+                                        "Eliminar Ajuste:", 
+                                        options=adjustments,
+                                        format_func=lambda x: f"{x['payroll_entries']['employee_name_snapshot']} - {x['adjustment_type'].upper()} ({format_currency(float(x['amount']))})"
+                                    )
+                                    if st.button("🗑️ Eliminar Ajuste Seleccionado"):
+                                        try:
+                                            supabase.table("payroll_adjustments").delete().eq("id", adj_to_delete["id"]).execute()
+                                            calculate_employee_totals(adj_to_delete["payroll_entry_id"])
+                                            calculate_payroll_totals(period["id"])
+                                            st.success("Ajuste eliminado.")
+                                            st.rerun()
+                                        except Exception as e:
+                                            st.error(str(e))
+                            else:
+                                st.info("No hay ajustes registrados para esta semana.")
+                        except Exception as e:
+                            st.error(f"Error al cargar ajustes: {str(e)}")
                         
                 # --- Action Buttons: Close, Pay, Anular ---
                 st.markdown("---")
@@ -461,27 +605,86 @@ with tab_pay_details:
         # Details list
         st.markdown("#### Cuentas de Transferencia por Trabajador")
         
+        # Details list
+        st.markdown("#### Planilla de Pagos y Cuentas de Transferencia")
+        
         pay_rows = []
         for e in entries:
             pay_rows.append({
-                "entry_id": e["id"],
-                "Trabajador": e["employee_name_snapshot"],
-                "Monto Neto": format_currency(float(e["net_total"])),
-                "Método": e["payment_method_snapshot"].upper(),
-                "Cuenta": e["account_snapshot"] or "",
-                "CCI": e["employees"]["cci"] or "",
-                "Estado Pago": e["payment_status"].upper()
+                "id": e["id"],
+                "Personal": e["employee_name_snapshot"],
+                "Total Bruto": float(e["gross_total"]),
+                "Descuento / Ajuste": float(e["adjustment_total"]),
+                "Neto Final": float(e["net_total"]),
+                "Método / Cuenta": f"{e['payment_method_snapshot'].upper()}: {e['account_snapshot'] or ''}".strip(": "),
+                "Pagado": e["payment_status"] == "pagado"
             })
         df_pay = pd.DataFrame(pay_rows)
-        st.dataframe(df_pay.drop(columns=["entry_id"]), use_container_width=True, hide_index=True)
         
+        # Store in session state for callback reference
+        st.session_state["current_pay_df"] = df_pay
+        
+        is_editable = (period["status"] in ("borrador", "cerrada") and can_write)
+        
+        edited_pay_df = st.data_editor(
+            df_pay,
+            column_config={
+                "id": None, # Hide ID
+                "Personal": st.column_config.TextColumn("Personal", disabled=True),
+                "Total Bruto": st.column_config.NumberColumn("Total Bruto", disabled=True, format="S/ %.2f"),
+                "Descuento / Ajuste": st.column_config.NumberColumn("Descuento / Ajuste (DSCTO)", disabled=not is_editable, format="S/ %.2f", step=5.0),
+                "Neto Final": st.column_config.NumberColumn("Neto Final", disabled=True, format="S/ %.2f"),
+                "Método / Cuenta": st.column_config.TextColumn("Números de Cuenta / Pago", disabled=True),
+                "Pagado": st.column_config.CheckboxColumn("¿Pagado?", disabled=not can_write)
+            },
+            hide_index=True,
+            use_container_width=True,
+            key="payroll_payments_editor",
+            on_change=save_payments_changes
+        )
+        
+        # Beautiful total summary cards or table below the grid
+        st.markdown("---")
+        sum_gross = df_pay["Total Bruto"].sum()
+        sum_adj = df_pay["Descuento / Ajuste"].sum()
+        sum_net = df_pay["Neto Final"].sum()
+        
+        col_t1, col_t2 = st.columns([2, 1])
+        with col_t1:
+            st.markdown(
+                f"""
+                <div style='background-color:#f9f9f9; padding: 15px; border-radius: 10px; border-left: 5px solid #1E3D59;'>
+                    <h5 style='margin: 0; color: #1E3D59;'>Resumen de Planilla</h5>
+                    <p style='margin: 5px 0 0 0;'><b>Total Bruto:</b> {format_currency(sum_gross)}</p>
+                    <p style='margin: 5px 0 0 0;'><b>Total Descuentos / Ajustes:</b> {format_currency(sum_adj)}</p>
+                    <p style='margin: 5px 0 0 0;'><b>Subtotal Neto:</b> <b>{format_currency(sum_net)}</b></p>
+                </div>
+                """, 
+                unsafe_allow_html=True
+            )
+            
+        with col_t2:
+            extra_name = st.text_input("Concepto Adicional (ej. Brandon Barrantes):", value="Brandon Barrantes", key="extra_pay_name")
+            extra_amount = st.number_input("Monto Adicional (S/):", min_value=0.0, value=0.0, step=100.0, key="extra_pay_amount")
+            
+            grand_total = sum_net + extra_amount
+            st.markdown(
+                f"""
+                <div style='background-color:#eef5f9; padding: 15px; border-radius: 10px; border-left: 5px solid #00c0f0; margin-top: 10px;'>
+                    <h4 style='margin: 0; color: #1E3D59; text-align: right;'>TOTAL A TRANSFERIR</h4>
+                    <h2 style='margin: 5px 0 0 0; color: #1E3D59; text-align: right;'>{format_currency(grand_total)}</h2>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            
         # Voucher Upload Section
         st.markdown("---")
         st.markdown("#### 📤 Cargar Comprobante de Pago (Voucher)")
         
         if can_write:
             # Dropdown for selecting paid workers
-            e_options = {r["entry_id"]: f"{r['Trabajador']} ({r['Monto Neto']})" for r in pay_rows}
+            e_options = {r["id"]: f"{r['Personal']} ({format_currency(r['Neto Final'])})" for r in pay_rows}
             target_entry_id = st.selectbox(
                 "Seleccionar trabajador para cargar voucher:",
                 options=list(e_options.keys()),
@@ -506,11 +709,15 @@ with tab_pay_details:
                         # Upload to 'vouchers' bucket
                         public_url = upload_document_to_supabase_storage(tmp_path, "vouchers", remote_name)
                         
+                        # Find entry in pay_rows
+                        target_row = [r for r in pay_rows if r["id"] == target_entry_id][0]
+                        original_entry = [e for e in entries if e["id"] == target_entry_id][0]
+                        
                         # Save payment record in payroll_payments
                         payment_data = {
                             "payroll_entry_id": target_entry_id,
-                            "paid_amount": [float(r["net_total"].replace("S/ ", "").replace(",", "")) for r in pay_rows if r["entry_id"] == target_entry_id][0],
-                            "payment_method": [r["Método"].lower() for r in pay_rows if r["entry_id"] == target_entry_id][0],
+                            "paid_amount": target_row["Neto Final"],
+                            "payment_method": original_entry["payment_method_snapshot"],
                             "voucher_url": public_url,
                             "status": "completado"
                         }
@@ -533,7 +740,7 @@ with tab_pay_details:
         try:
             payments_res = supabase.table("payroll_payments") \
                 .select("*, payroll_entries(employee_name_snapshot)") \
-                .in_("payroll_entry_id", [r["entry_id"] for r in pay_rows]) \
+                .in_("payroll_entry_id", [r["id"] for r in pay_rows]) \
                 .execute().data
                 
             if payments_res:

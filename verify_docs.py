@@ -97,11 +97,13 @@ def test_pdf_generation(output_path):
     print(f"PDF test passed. File saved to: {output_path}")
 
 if __name__ == "__main__":
-    template = r"C:\Users\Dayana\.gemini\antigravity\scratch\gnb_backoffice\templates\cotizacion_base.docx"
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    template = os.path.join(base_dir, "templates", "cotizacion_base.docx")
     
-    out_docx = r"C:\Users\Dayana\.gemini\antigravity\scratch\gnb_backoffice\verify_cotiz_test.docx"
-    out_pdf = r"C:\Users\Dayana\.gemini\antigravity\scratch\gnb_backoffice\verify_cotiz_test.pdf"
+    out_docx = os.path.join(base_dir, "verify_cotiz_test.docx")
+    out_pdf = os.path.join(base_dir, "verify_cotiz_test.pdf")
     
     test_docx_generation(template, out_docx)
     test_pdf_generation(out_pdf)
     print("\n[OK] DOCUMENT COMPILER TESTS COMPLETED SUCCESSFULLY!")
+

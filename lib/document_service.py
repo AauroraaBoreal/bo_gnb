@@ -46,7 +46,46 @@ def upload_document_to_supabase_storage(file_path: str, bucket: str, remote_path
         raise IOError(f"Error al subir archivo a Supabase Storage ({bucket}/{remote_path}): {str(e)}")
 
 
+def check_custom_template_exists() -> bool:
+    """
+    Checks if a custom template has been uploaded to Supabase Storage.
+    """
+    try:
+        supabase = get_supabase_client()
+        files = supabase.storage.from_("quotations").list()
+        if files and isinstance(files, list):
+            return any(isinstance(f, dict) and f.get("name") == "cotizacion_template.docx" for f in files)
+        return False
+    except Exception:
+        return False
+
+
+def get_template_file_path() -> str:
+    """
+    Returns the path to the template file.
+    If a custom template exists in Supabase Storage ('cotizacion_template.docx'),
+    it downloads it to a temporary location and returns that path.
+    Otherwise, it returns the local template file path.
+    """
+    local_path = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates", "cotizacion_base.docx"))
+    
+    try:
+        if check_custom_template_exists():
+            supabase = get_supabase_client()
+            import tempfile
+            res = supabase.storage.from_("quotations").download("cotizacion_template.docx")
+            tmp_file = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
+            tmp_file.write(res)
+            tmp_file.close()
+            return tmp_file.name
+    except Exception as e:
+        print(f"Error checking/downloading custom template: {e}")
+        
+    return local_path
+
+
 # --- DOCX GENERATION ---
+
 
 def generate_docx_from_template(quotation_id: str, template_path: str, output_path: str):
     """

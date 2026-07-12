@@ -6,7 +6,7 @@ import pandas as pd
 from lib.auth import auth_gate, check_permission
 from lib.supabase_client import get_supabase_client
 from lib.quotation_service import generate_quotation_number, calculate_quotation_totals, duplicate_quotation
-from lib.document_service import generate_docx_from_template, generate_pdf_from_quotation, upload_document_to_supabase_storage
+from lib.document_service import generate_docx_from_template, generate_pdf_from_quotation, upload_document_to_supabase_storage, get_template_file_path
 from lib.db import get_clients
 from lib.utils import format_currency
 
@@ -159,7 +159,7 @@ with tab_new:
                             pdf_path = os.path.join(tmp_dir, pdf_name)
                             
                             # Compile DOCX
-                            template_file = r"C:\Users\Dayana\.gemini\antigravity\scratch\gnb_backoffice\templates\cotizacion_base.docx"
+                            template_file = get_template_file_path()
                             generate_docx_from_template(new_q["id"], template_file, docx_path)
                             
                             # Compile PDF
@@ -282,7 +282,7 @@ with tab_edit:
                                 docx_path = os.path.join(tmp_dir, docx_name)
                                 pdf_path = os.path.join(tmp_dir, pdf_name)
                                 
-                                template_file = r"C:\Users\Dayana\.gemini\antigravity\scratch\gnb_backoffice\templates\cotizacion_base.docx"
+                                template_file = get_template_file_path()
                                 generate_docx_from_template(selected_draft_id, template_file, docx_path)
                                 generate_pdf_from_quotation(selected_draft_id, pdf_path)
                                 
