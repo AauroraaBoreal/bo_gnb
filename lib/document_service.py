@@ -113,68 +113,123 @@ def generate_docx_from_template(quotation_id: str, template_path: str, output_pa
     total_str = f"{'S/' if quote['currency'] == 'soles' else '$'} {total_val:,.2f}"
     total_words = f"({quote['total_in_words']})"
     
+    replacements = {
+        "{{quotation_date}}": date_str,
+        "{{client_name}}": client_name,
+        "{{client_attention}}": client_attention,
+        "{{quotation_number}}": q_number,
+        "{{igv_text}}": igv_label,
+        "{{currency_text}}": f"Moneda: {currency_label}",
+        "{{total_amount}}": total_str,
+        "{{total_in_words}}": total_words
+    }
+    
     # 2. Open document
     doc = Document(template_path)
     
-    # Replace placeholders in paragraphs
-    for p in doc.paragraphs:
-        if "{{quotation_date}}" in p.text:
-            p.text = p.text.replace("{{quotation_date}}", date_str)
-        if "{{client_name}}" in p.text:
-            p.text = p.text.replace("{{client_name}}", client_name)
-        if "{{client_attention}}" in p.text:
-            p.text = p.text.replace("{{client_attention}}", client_attention)
-        if "{{quotation_number}}" in p.text:
-            p.text = p.text.replace("{{quotation_number}}", q_number)
-        if "{{igv_text}}" in p.text:
-            p.text = p.text.replace("{{igv_text}}", igv_label)
-        if "{{currency_text}}" in p.text:
-            p.text = p.text.replace("{{currency_text}}", f"Moneda: {currency_label}")
-        if "{{total_amount}}" in p.text:
-            p.text = p.text.replace("{{total_amount}}", total_str)
-        if "{{total_in_words}}" in p.text:
-            p.text = p.text.replace("{{total_in_words}}", total_words)
+    # Helper function to replace in a list of paragraphs
+    def replace_in_paragraphs(paragraphs):
+        for p in paragraphs:
+            for placeholder, value in replacements.items():
+                if placeholder in p.text:
+                    p.text = p.text.replace(placeholder, value)
+                    
+    # Helper to scan and replace in tables
+    def replace_in_table(t):
+        for row in t.rows:
+            for cell in row.cells:
+                replace_in_paragraphs(cell.paragraphs)
+
+    # Replace in body paragraphs
+    replace_in_paragraphs(doc.paragraphs)
+    
+    # Find the items table by checking for headers keywords
+    items_table = None
+    for t in doc.tables:
+        found = False
+        # Check first 5 rows for keywords
+        for r_idx in range(min(5, len(t.rows))):
+            try:
+                row_texts = [cell.text.upper() for cell in t.rows[r_idx].cells]
+                if any("SERVICIO" in txt or "ITEM" in txt or "DESCRIPCIÓN" in txt or "DESCRIPCION" in txt or "CANT" in txt for txt in row_texts):
+                    items_table = t
+                    found = True
+                    break
+            except Exception:
+                pass
+        if found:
+            break
             
-    # Replace in table (Table 0)
-    # The table structure should be:
-    # Row 0: Header (ITEM, SERVICIO, Cant.Und., Precio, Total)
-    # Row 1+: Dynamic rows
-    if len(doc.tables) > 0:
-        table = doc.tables[0]
+    if not items_table and len(doc.tables) > 0:
+        items_table = doc.tables[0]
         
-        # We find the placeholder row (usually row 2 since row 0 is empty, row 1 is headers)
-        # Let's clean up all rows after headers (index 1) and add new ones
-        while len(table.rows) > 2:
-            # Delete extra rows
-            table._tbl.remove(table.rows[-1]._tr)
+    # Replace in all other tables
+    for t in doc.tables:
+        if t is not items_table:
+            replace_in_table(t)
             
-        # Get the style of the template item row (row 2)
-        # We will use row 2 to write our items, adding new rows as needed
-        row_idx = 2
+    # Replace in headers and footers
+    for section in doc.sections:
+        if section.header:
+            replace_in_paragraphs(section.header.paragraphs)
+            for t in section.header.tables:
+                replace_in_table(t)
+        if section.footer:
+            replace_in_paragraphs(section.footer.paragraphs)
+            for t in section.footer.tables:
+                replace_in_table(t)
+                
+    # 3. Populate items table
+    if items_table:
+        # Find header index and template row index in items table
+        header_idx = 1
+        template_idx = 2
+        for r_idx in range(len(items_table.rows)):
+            try:
+                row_texts = [cell.text.upper() for cell in items_table.rows[r_idx].cells]
+                if any("SERVICIO" in txt or "DESCRIPCIÓN" in txt or "DESCRIPCION" in txt for txt in row_texts):
+                    header_idx = r_idx
+                    template_idx = r_idx + 1 if r_idx + 1 < len(items_table.rows) else r_idx
+                    break
+            except Exception:
+                pass
+                
+        # Clean extra rows after template_idx
+        while len(items_table.rows) > (template_idx + 1):
+            items_table._tbl.remove(items_table.rows[-1]._tr)
+            
+        # Ensure we have at least the template row
+        while len(items_table.rows) < (template_idx + 1):
+            items_table.add_row()
+            
+        row_idx = template_idx
         
         for item in items:
             desc = item["service_description"]
-            # Split lines for multi-line description vertical merge support
+            # Split lines for multi-line description support
             lines = [line.strip() for line in desc.split("\n") if line.strip()]
             if not lines:
                 lines = [""]
                 
             start_row = row_idx
             
-            # For each line, add a row (or use row 2 if it's the first run)
-            for idx, line in enumerate(lines):
-                if row_idx >= len(table.rows):
-                    table.add_row()
+            for line in lines:
+                if row_idx >= len(items_table.rows):
+                    items_table.add_row()
                     
-                row = table.rows[row_idx]
+                row = items_table.rows[row_idx]
                 
-                # Fill cells
-                row.cells[0].text = str(item["item_order"])
-                row.cells[1].text = line
-                row.cells[2].text = f"{int(item['quantity'])} {item['unit']}"
-                row.cells[3].text = f"{float(item['unit_price']):,.2f}"
-                row.cells[4].text = f"{float(item['total']):,.2f}"
-                
+                # Safe fill of cell contents
+                if len(row.cells) >= 5:
+                    row.cells[0].text = str(item["item_order"])
+                    row.cells[1].text = line
+                    row.cells[2].text = f"{int(item['quantity'])} {item['unit']}"
+                    row.cells[3].text = f"{float(item['unit_price']):,.2f}"
+                    row.cells[4].text = f"{float(item['total']):,.2f}"
+                elif len(row.cells) > 1:
+                    row.cells[0].text = str(item["item_order"])
+                    row.cells[1].text = line
+                    
                 row_idx += 1
                 
             end_row = row_idx - 1
@@ -182,10 +237,11 @@ def generate_docx_from_template(quotation_id: str, template_path: str, output_pa
             # Merge cells vertically in columns 0, 2, 3, and 4
             if end_row > start_row:
                 for col in [0, 2, 3, 4]:
-                    first_cell = table.cell(start_row, col)
-                    for r in range(start_row + 1, end_row + 1):
-                        cell = table.cell(r, col)
-                        first_cell.merge(cell)
+                    if col < len(items_table.columns):
+                        first_cell = items_table.cell(start_row, col)
+                        for r in range(start_row + 1, end_row + 1):
+                            cell = items_table.cell(r, col)
+                            first_cell.merge(cell)
                         
     doc.save(output_path)
 

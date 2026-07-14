@@ -716,9 +716,7 @@ with tab_active:
                             
                     if cancel_clonar:
                         st.session_state["confirm_clonar"] = False
-                        st.rerun()     except Exception as e:
-                                    st.error(str(e))
-                                    
+                        st.rerun()
                 # --- EXPORTS & DOWNLOADS ---
                 st.markdown("---")
                 st.markdown("#### 📥 Descargar Reportes")
