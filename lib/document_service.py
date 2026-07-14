@@ -84,6 +84,38 @@ def get_template_file_path() -> str:
     return local_path
 
 
+def get_watermark_image_path() -> str:
+    """
+    Checks if a custom template exists, and if so, extracts its watermark image (word/media/image1.jpg)
+    to a temporary file and returns its path.
+    """
+    try:
+        template_path = get_template_file_path()
+        local_base_path = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates", "cotizacion_base.docx"))
+        
+        # If the template path points to a downloaded custom template, we extract the image
+        if template_path != local_base_path and os.path.exists(template_path):
+            import zipfile
+            import tempfile
+            with zipfile.ZipFile(template_path, 'r') as z:
+                # Find any image in word/media/
+                media_files = [name for name in z.namelist() if name.startswith("word/media/")]
+                if media_files:
+                    # We pick the first image (usually image1.jpg or image1.png, which is the watermark)
+                    img_data = z.read(media_files[0])
+                    ext = media_files[0].split(".")[-1]
+                    
+                    # Write to a persistent temp file
+                    tmp_dir = tempfile.gettempdir()
+                    watermark_temp_path = os.path.join(tmp_dir, f"gnb_watermark.{ext}")
+                    with open(watermark_temp_path, "wb") as f:
+                        f.write(img_data)
+                    return watermark_temp_path
+    except Exception as e:
+        print(f"Error extracting watermark image: {e}")
+    return None
+
+
 # --- DOCX GENERATION ---
 
 
@@ -124,8 +156,29 @@ def generate_docx_from_template(quotation_id: str, template_path: str, output_pa
         "{{total_in_words}}": total_words
     }
     
-    # 2. Open document
-    doc = Document(template_path)
+    # Check if custom template has tables
+    local_base_path = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates", "cotizacion_base.docx"))
+    
+    # 2. Open document.
+    # If the custom template has no tables, we use the local base template as the layout,
+    # and we will later merge the watermark header from the custom template.
+    use_watermark_merge = False
+    actual_template_path = template_path
+    
+    try:
+        temp_doc = Document(template_path)
+        has_tables = len(temp_doc.tables) > 0
+        
+        # If it doesn't look like a complete template, we use the base template and merge headers
+        if not has_tables and template_path != local_base_path:
+            actual_template_path = local_base_path
+            use_watermark_merge = True
+    except Exception as e:
+        print(f"Error checking template structure, falling back to base template: {e}")
+        actual_template_path = local_base_path
+        use_watermark_merge = True
+        
+    doc = Document(actual_template_path)
     
     # Helper function to replace in a list of paragraphs
     def replace_in_paragraphs(paragraphs):
@@ -242,8 +295,39 @@ def generate_docx_from_template(quotation_id: str, template_path: str, output_pa
                         for r in range(start_row + 1, end_row + 1):
                             cell = items_table.cell(r, col)
                             first_cell.merge(cell)
-                        
+                            
+    # Save the populated document
     doc.save(output_path)
+    
+    # 4. If we need to merge the watermark header from the custom template
+    if use_watermark_merge:
+        try:
+            import zipfile
+            import shutil
+            
+            # Extract header and media from the custom template
+            watermark_files = {}
+            with zipfile.ZipFile(template_path, 'r') as z_custom:
+                for name in z_custom.namelist():
+                    if name == "word/header1.xml" or name == "word/_rels/header1.xml.rels" or name.startswith("word/media/"):
+                        watermark_files[name] = z_custom.read(name)
+                        
+            if watermark_files:
+                temp_zip = output_path + ".tmp"
+                with zipfile.ZipFile(output_path, 'r') as z_in:
+                    with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_DEFLATED) as z_out:
+                        # Copy all files from populated docx except the ones we want to overwrite
+                        for item in z_in.infolist():
+                            if item.filename not in watermark_files:
+                                z_out.writestr(item, z_in.read(item.filename))
+                                
+                        # Insert watermark files
+                        for name, data in watermark_files.items():
+                            z_out.writestr(name, data)
+                
+                shutil.move(temp_zip, output_path)
+        except Exception as merge_err:
+            print(f"Error merging watermark header: {merge_err}")
 
 
 # --- PDF GENERATION ---
@@ -381,7 +465,28 @@ def generate_pdf_from_quotation(quotation_id: str, output_path: str):
     story.append(Paragraph(footer_html, meta_style))
     
     # Build
-    doc.build(story)
+    # Get the extracted watermark image path
+    watermark_image_path = get_watermark_image_path()
+    
+    def draw_watermark_cb(canvas, document):
+        if watermark_image_path and os.path.exists(watermark_image_path):
+            canvas.saveState()
+            # Draw image spanning the whole page (Letter size: width=612, height=792)
+            canvas.drawImage(watermark_image_path, 0, 0, width=letter[0], height=letter[1], mask='auto')
+            canvas.restoreState()
+            
+    if watermark_image_path:
+        try:
+            doc.build(story, onFirstPage=draw_watermark_cb, onLaterPages=draw_watermark_cb)
+        finally:
+            # Clean up the watermark image temp file
+            try:
+                if os.path.exists(watermark_image_path):
+                    os.remove(watermark_image_path)
+            except Exception:
+                pass
+    else:
+        doc.build(story)
 
 
 # --- EXCEL PAYROLL EXPORT ---
