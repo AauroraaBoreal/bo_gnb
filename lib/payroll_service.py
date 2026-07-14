@@ -12,9 +12,9 @@ def calculate_period_dates(payment_date: datetime.date):
     end_date = payment_date - datetime.timedelta(days=2)
     return start_date, end_date
 
-def create_payroll_period(payment_date: datetime.date, user_id: str = None):
+def create_payroll_period(payment_date: datetime.date, user_id: str = None, employee_ids: list = None, is_test: bool = False):
     """
-    Creates a new weekly payroll period and populates it with all active workers.
+    Creates a new weekly payroll period and populates it with selected or active workers.
     """
     supabase = get_supabase_client()
     
@@ -40,7 +40,8 @@ def create_payroll_period(payment_date: datetime.date, user_id: str = None):
         "total_gross": 0.00,
         "total_adjustments": 0.00,
         "total_net": 0.00,
-        "created_by": user_id
+        "created_by": user_id,
+        "is_test": is_test
     }
     period_res = supabase.table("payroll_periods").insert(period_data).execute()
     new_period = period_res.data[0]
@@ -48,8 +49,14 @@ def create_payroll_period(payment_date: datetime.date, user_id: str = None):
     # Log audit
     log_change("payroll_periods", new_period["id"], "INSERT", None, new_period, user_id)
     
-    # 3. Load active workers
-    workers = supabase.table("employees").select("*").eq("active", True).execute().data
+    # 3. Load workers
+    if employee_ids is not None:
+        if len(employee_ids) == 0:
+            workers = []
+        else:
+            workers = supabase.table("employees").select("*").in_("id", employee_ids).execute().data
+    else:
+        workers = supabase.table("employees").select("*").eq("active", True).execute().data
     
     # 4. Generate entries and days
     day_names = ["martes", "miercoles", "jueves", "viernes", "sabado", "domingo", "lunes"]
@@ -252,3 +259,100 @@ def mark_payroll_as_paid(period_id: str, user_id: str = None):
     
     log_change("payroll_periods", period_id, "UPDATE", old_data, new_data, user_id)
     return new_data
+
+def add_employee_to_payroll(period_id: str, employee_id: str):
+    """
+    Manually adds a worker to an existing payroll period.
+    Generates snapshot entry and 7 work days initialized to 0.
+    """
+    supabase = get_supabase_client()
+    
+    # Check if entry already exists
+    existing = supabase.table("payroll_entries") \
+        .select("id") \
+        .eq("payroll_period_id", period_id) \
+        .eq("employee_id", employee_id) \
+        .execute().data
+    if existing:
+        return existing[0]
+        
+    # Fetch worker details
+    worker_res = supabase.table("employees").select("*").eq("id", employee_id).execute().data
+    if not worker_res:
+        raise ValueError("Trabajador no encontrado.")
+    worker = worker_res[0]
+    
+    # Fetch period details to calculate dates
+    period_res = supabase.table("payroll_periods").select("*").eq("id", period_id).execute().data
+    if not period_res:
+        raise ValueError("Planilla no encontrada.")
+    period = period_res[0]
+    
+    start_date = datetime.datetime.strptime(period["period_start"], "%Y-%m-%d").date()
+    
+    # Get settings for default multiplier
+    sunday_mult = float(get_setting_value("sunday_multiplier", "2.0"))
+    
+    # Create snapshot entry
+    entry_data = {
+        "payroll_period_id": period_id,
+        "employee_id": employee_id,
+        "employee_name_snapshot": worker["full_name"],
+        "worker_type_snapshot": worker["worker_type"],
+        "daily_rate_snapshot": worker["daily_rate"],
+        "hourly_rate_snapshot": worker["hourly_rate"],
+        "payment_method_snapshot": worker["payment_method"],
+        "account_snapshot": worker["yape_phone"] if worker["payment_method"] == "yape" else worker["account_number"],
+        "gross_total": 0.00,
+        "adjustment_total": 0.00,
+        "net_total": 0.00,
+        "payment_status": "pendiente",
+        "notes": ""
+    }
+    entry_res = supabase.table("payroll_entries").insert(entry_data).execute()
+    new_entry = entry_res.data[0]
+    
+    # Create 7 daily work records
+    day_names = ["martes", "miercoles", "jueves", "viernes", "sabado", "domingo", "lunes"]
+    for i, name in enumerate(day_names):
+        w_date = start_date + datetime.timedelta(days=i)
+        mult = sunday_mult if name == "domingo" else 1.00
+        
+        day_data = {
+            "payroll_entry_id": new_entry["id"],
+            "work_date": str(w_date),
+            "day_name": name,
+            "hours_worked": 0.00,
+            "multiplier": 1.00 if worker["worker_type"] in ("operario_fijo", "jefe") else mult,
+            "calculated_amount": 0.00,
+            "notes": ""
+        }
+        supabase.table("payroll_days").insert(day_data).execute()
+        
+    calculate_employee_totals(new_entry["id"])
+    calculate_payroll_totals(period_id)
+    return new_entry
+
+def remove_employee_from_payroll(period_id: str, employee_id: str):
+    """
+    Manually removes a worker from an existing payroll period.
+    Deletes payroll entry (associated days and adjustments cascade delete).
+    """
+    supabase = get_supabase_client()
+    
+    # Find entry
+    entry_res = supabase.table("payroll_entries") \
+        .select("id") \
+        .eq("payroll_period_id", period_id) \
+        .eq("employee_id", employee_id) \
+        .execute().data
+    if not entry_res:
+        return False
+        
+    entry_id = entry_res[0]["id"]
+    # Delete entry
+    supabase.table("payroll_entries").delete().eq("id", entry_id).execute()
+    
+    # Recalculate totals
+    calculate_payroll_totals(period_id)
+    return True

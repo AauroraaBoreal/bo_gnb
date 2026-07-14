@@ -154,3 +154,35 @@ CREATE POLICY "Allow read to all authenticated" ON audit_log
 
 CREATE POLICY "Allow insert to all authenticated" ON audit_log
   FOR INSERT TO authenticated WITH CHECK (true);
+
+
+-- 18. STORAGE OBJECTS Policies (Buckets: quotations, payrolls, employee-docs, vouchers)
+CREATE POLICY "Allow read access to public buckets for authenticated users"
+ON storage.objects FOR SELECT
+TO authenticated
+USING (bucket_id IN ('quotations', 'vouchers', 'employee-docs', 'payrolls'));
+
+CREATE POLICY "Allow upload for admin and jefe"
+ON storage.objects FOR INSERT
+TO authenticated
+WITH CHECK (
+  bucket_id IN ('quotations', 'vouchers', 'employee-docs', 'payrolls')
+  AND public.get_current_user_role() IN ('admin', 'jefe')
+);
+
+CREATE POLICY "Allow update for admin and jefe"
+ON storage.objects FOR UPDATE
+TO authenticated
+USING (
+  bucket_id IN ('quotations', 'vouchers', 'employee-docs', 'payrolls')
+  AND public.get_current_user_role() IN ('admin', 'jefe')
+);
+
+CREATE POLICY "Allow delete for admin and jefe"
+ON storage.objects FOR DELETE
+TO authenticated
+USING (
+  bucket_id IN ('quotations', 'vouchers', 'employee-docs', 'payrolls')
+  AND public.get_current_user_role() IN ('admin', 'jefe')
+);
+

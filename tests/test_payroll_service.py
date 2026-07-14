@@ -188,3 +188,65 @@ def test_mark_payroll_as_paid(supabase_mock):
     assert res is not None
     assert res["status"] == "pagada"
     assert res["paid_by"] == "admin_1"
+
+def test_create_payroll_period_with_selected_workers(supabase_mock, mocker):
+    pay_date = datetime.date(2026, 7, 15)
+    supabase_mock.set_table_data("payroll_periods", [])
+    supabase_mock.set_table_data("employees", [
+        {"id": "emp_1", "full_name": "Juan Perez", "worker_type": "operario_fijo", "daily_rate": 60.00, "hourly_rate": 7.50, "payment_method": "banco", "account_number": "123", "active": True},
+        {"id": "emp_2", "full_name": "Pedro Lopez", "worker_type": "temporal", "daily_rate": 40.00, "hourly_rate": 5.00, "payment_method": "plin", "active": True}
+    ])
+    supabase_mock.set_table_data("app_settings", [{"setting_key": "sunday_multiplier", "setting_value": "2.0"}])
+    
+    # Create payroll only with Juan Perez (emp_1) and mark as test
+    new_period = create_payroll_period(pay_date, user_id="admin_1", employee_ids=["emp_1"], is_test=True)
+    
+    assert new_period is not None
+    assert new_period["is_test"] is True
+    
+    # Verify that only 1 entry was created
+    entries = supabase_mock.table("payroll_entries").data
+    assert len(entries) == 1
+    assert entries[0]["employee_id"] == "emp_1"
+
+def test_add_remove_employee_from_payroll(supabase_mock):
+    # Setup period
+    supabase_mock.set_table_data("payroll_periods", [{
+        "id": "period_123", 
+        "period_start": "2026-07-07", 
+        "period_end": "2026-07-13", 
+        "payment_date": "2026-07-15",
+        "total_gross": 0.00,
+        "total_adjustments": 0.00,
+        "total_net": 0.00
+    }])
+    # Setup employee to add
+    supabase_mock.set_table_data("employees", [
+        {"id": "emp_new", "full_name": "Maria Rojas", "worker_type": "operario_fijo", "daily_rate": 80.00, "hourly_rate": 10.00, "payment_method": "yape", "yape_phone": "999888777", "active": False}
+    ])
+    supabase_mock.set_table_data("payroll_entries", [])
+    supabase_mock.set_table_data("payroll_days", [])
+    supabase_mock.set_table_data("app_settings", [{"setting_key": "sunday_multiplier", "setting_value": "2.0"}])
+    
+    # 1. Add employee to payroll
+    from lib.payroll_service import add_employee_to_payroll, remove_employee_from_payroll
+    entry = add_employee_to_payroll("period_123", "emp_new")
+    
+    assert entry is not None
+    assert entry["employee_name_snapshot"] == "Maria Rojas"
+    assert entry["gross_total"] == 560.00 # 7 days * 80.00 daily rate
+    
+    # Check payroll totals updated
+    period = supabase_mock.table("payroll_periods").data[0]
+    assert float(period["total_net"]) == 560.00
+    
+    # 2. Remove employee from payroll
+    success = remove_employee_from_payroll("period_123", "emp_new")
+    assert success is True
+    
+    entries = supabase_mock.table("payroll_entries").data
+    assert len(entries) == 0
+    
+    # Check payroll totals updated back to 0
+    period = supabase_mock.table("payroll_periods").data[0]
+    assert float(period["total_net"]) == 0.00

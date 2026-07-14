@@ -31,8 +31,8 @@ try:
     
     quotes_accepted = len(supabase.table("quotations").select("id").eq("status", "aceptada").eq("quotation_year", curr_year).execute().data)
     
-    # Current Payroll (Total net of the latest closed or active payroll period)
-    latest_payroll_res = supabase.table("payroll_periods").select("total_net, status").order("payment_date", desc=True).limit(1).execute()
+    # Current Payroll (Total net of the latest closed or active payroll period, ignoring test ones)
+    latest_payroll_res = supabase.table("payroll_periods").select("total_net, status").neq("is_test", True).order("payment_date", desc=True).limit(1).execute()
     latest_payroll_net = 0.00
     latest_payroll_status = "N/A"
     
@@ -72,6 +72,7 @@ with col_left:
     try:
         payrolls = supabase.table("payroll_periods") \
             .select("title, payment_date, total_net, status") \
+            .neq("is_test", True) \
             .order("payment_date", desc=True) \
             .limit(5) \
             .execute().data

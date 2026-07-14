@@ -7,7 +7,8 @@ from lib.auth import auth_gate, check_permission
 from lib.supabase_client import get_supabase_client
 from lib.payroll_service import (
     create_payroll_period, save_payroll_draft, close_payroll, 
-    mark_payroll_as_paid, calculate_payroll_totals, calculate_employee_totals
+    mark_payroll_as_paid, calculate_payroll_totals, calculate_employee_totals,
+    add_employee_to_payroll, remove_employee_from_payroll
 )
 from lib.document_service import export_payroll_excel, export_payroll_pdf, upload_document_to_supabase_storage
 from lib.excel_importer import parse_and_import_excel_payroll
@@ -226,21 +227,46 @@ with tab_active:
                 next_wed = today + datetime.timedelta(days=days_ahead)
                 
                 payment_date = st.date_input("Fecha de Pago (Miércoles):", value=next_wed)
+                is_test_period = st.checkbox("¿Es planilla de prueba?", value=False, help="Las planillas de prueba se excluyen de los totales finales del Dashboard y Reportes.")
                 
                 # Check Tuesday-Monday dates preview
                 start_p, end_p = payment_date - datetime.timedelta(days=8), payment_date - datetime.timedelta(days=2)
                 st.markdown(f"**Semana de trabajo:** Martes {start_p.strftime('%d/%m/%Y')} al Lunes {end_p.strftime('%d/%m/%Y')}")
                 
+                # Load all employees
+                try:
+                    all_emps = supabase.table("employees").select("id, full_name, active").order("full_name").execute().data
+                except Exception as e:
+                    st.error(f"Error al cargar trabajadores: {str(e)}")
+                    all_emps = []
+                    
+                if all_emps:
+                    emp_options = {emp["id"]: f"{emp['full_name']} {'🟢' if emp['active'] else '🔴 (Inactivo)'}" for emp in all_emps}
+                    default_selected = [emp["id"] for emp in all_emps if emp["active"]]
+                    
+                    selected_emps = st.multiselect(
+                        "Confirmar trabajadores a incluir:",
+                        options=list(emp_options.keys()),
+                        default=default_selected,
+                        format_func=lambda x: emp_options[x]
+                    )
+                else:
+                    selected_emps = []
+                    st.warning("No se encontraron trabajadores en el sistema.")
+                
                 if st.button("Crear Planilla", use_container_width=True):
                     if payment_date.weekday() != 2:
                         st.warning("Advertencia: El día de pago sugerido debe ser un miércoles.")
-                    try:
-                        with st.spinner("Inicializando planilla y cargando trabajadores activos..."):
-                            create_payroll_period(payment_date, user["id"])
-                        st.success("Planilla semanal creada.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
+                    if not selected_emps:
+                        st.error("Debe seleccionar al menos un trabajador para crear la planilla.")
+                    else:
+                        try:
+                            with st.spinner("Inicializando planilla y cargando trabajadores seleccionados..."):
+                                create_payroll_period(payment_date, user["id"], employee_ids=selected_emps, is_test=is_test_period)
+                            st.success("Planilla semanal creada.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
 
     # --- Load Selected Period Data ---
     if selected_period_id:
@@ -253,7 +279,21 @@ with tab_active:
         if period:
             period = period[0]
             st.markdown(f"### 📂 {period['title']}")
+            is_test_val = period.get("is_test", False)
+            if is_test_val:
+                st.warning("⚠️ **ESTA PLANILLA ESTÁ MARCADA COMO PRUEBA** (No se considerará en los totales ni reportes acumulados)")
+            
             st.markdown(f"**Fecha Pago:** {period['payment_date']} | **Estado:** `{period['status'].upper()}`")
+            
+            if period["status"] == "borrador" and can_write:
+                new_is_test = st.checkbox("Marcar esta planilla como de prueba", value=is_test_val, key=f"toggle_is_test_{period['id']}")
+                if new_is_test != is_test_val:
+                    try:
+                        supabase.table("payroll_periods").update({"is_test": new_is_test}).eq("id", period["id"]).execute()
+                        st.success("Estado de planilla de prueba actualizado.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al cambiar estado de prueba: {str(e)}")
             
             # Display KPIs for the active period
             kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
@@ -348,6 +388,91 @@ with tab_active:
                         except Exception as e:
                             st.error(f"Error al recalcular: {str(e)}")
                             
+                # --- Manage Workers Block ---
+                with st.expander("👤 Administrar Trabajadores en esta Planilla (Agregar/Remover)"):
+                    try:
+                        # Load all system workers
+                        sys_workers = supabase.table("employees").select("id, full_name, active").order("full_name").execute().data
+                        # Workers currently in the payroll
+                        payroll_worker_ids = set(e["employee_id"] for e in entries)
+                        
+                        # 1. Missing active workers
+                        missing_active = [w for w in sys_workers if w["active"] and w["id"] not in payroll_worker_ids]
+                        
+                        # 2. Inactive workers currently in payroll
+                        sys_worker_map = {w["id"]: w for w in sys_workers}
+                        inactive_in_payroll = []
+                        for e_entry in entries:
+                            w_data = sys_worker_map.get(e_entry["employee_id"])
+                            if w_data and not w_data["active"]:
+                                inactive_in_payroll.append(e_entry)
+                                
+                        col_manage1, col_manage2 = st.columns(2)
+                        
+                        with col_manage1:
+                            st.markdown("##### ➕ Agregar Trabajadores Faltantes")
+                            if missing_active:
+                                st.info("Los siguientes trabajadores están activos en el sistema pero NO en esta planilla:")
+                                for w in missing_active:
+                                    col_w_name, col_w_btn = st.columns([3, 1])
+                                    col_w_name.write(w["full_name"])
+                                    if is_editable:
+                                        if col_w_btn.button("Agregar", key=f"add_w_{w['id']}", use_container_width=True):
+                                            add_employee_to_payroll(period["id"], w["id"])
+                                            st.success(f"{w['full_name']} agregado a la planilla.")
+                                            st.rerun()
+                                    else:
+                                        col_w_btn.write("-")
+                            else:
+                                st.write("No hay trabajadores activos faltantes.")
+                                
+                            st.markdown("###### Agregar inactivo manualmente:")
+                            sys_inactive = [w for w in sys_workers if not w["active"] and w["id"] not in payroll_worker_ids]
+                            if sys_inactive:
+                                selected_inactive = st.selectbox(
+                                    "Seleccionar trabajador inactivo:",
+                                    options=[None] + sys_inactive,
+                                    format_func=lambda x: x["full_name"] if x else "Seleccionar...",
+                                    key="add_inactive_select"
+                                )
+                                if selected_inactive and is_editable:
+                                    if st.button("Agregar Trabajador Inactivo", use_container_width=True):
+                                        add_employee_to_payroll(period["id"], selected_inactive["id"])
+                                        st.success(f"{selected_inactive['full_name']} agregado a la planilla.")
+                                        st.rerun()
+                            else:
+                                st.write("No hay trabajadores inactivos disponibles.")
+                                
+                        with col_manage2:
+                            st.markdown("##### 🗑️ Remover Trabajadores")
+                            if inactive_in_payroll:
+                                st.warning("Los siguientes trabajadores están en la planilla pero han sido INHABILITADOS:")
+                                for e_inact in inactive_in_payroll:
+                                    col_e_name, col_e_btn = st.columns([3, 1])
+                                    col_e_name.write(f"🔴 {e_inact['employee_name_snapshot']}")
+                                    if is_editable:
+                                        if col_e_btn.button("Remover", key=f"remove_w_{e_inact['employee_id']}", use_container_width=True):
+                                            remove_employee_from_payroll(period["id"], e_inact["employee_id"])
+                                            st.success(f"{e_inact['employee_name_snapshot']} removido de la planilla.")
+                                            st.rerun()
+                                    else:
+                                        col_e_btn.write("-")
+                                        
+                            st.markdown("###### Remover cualquier trabajador:")
+                            selected_to_remove = st.selectbox(
+                                "Seleccionar trabajador a remover:",
+                                options=[None] + entries,
+                                format_func=lambda x: x["employee_name_snapshot"] if x else "Seleccionar...",
+                                key="remove_manual_select"
+                            )
+                            if selected_to_remove and is_editable:
+                                if st.button("Remover de la Planilla", use_container_width=True, type="secondary"):
+                                    remove_employee_from_payroll(period["id"], selected_to_remove["employee_id"])
+                                    st.success(f"{selected_to_remove['employee_name_snapshot']} removido de la planilla.")
+                                    st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al administrar trabajadores: {str(e)}")
+
                 # --- Adjustments & Discounts Block ---
                 st.markdown("---")
                 with st.expander("➕ Registro de Ajustes Avanzados / Detallados (Opcional)"):
@@ -454,76 +579,144 @@ with tab_active:
                                 st.info("No hay ajustes registrados para esta semana.")
                         except Exception as e:
                             st.error(f"Error al cargar ajustes: {str(e)}")
-                        
-                # --- Action Buttons: Close, Pay, Anular ---
                 st.markdown("---")
                 st.markdown("#### ⚙️ Operaciones de Planilla")
                 
+                # Initialize state variables
+                if "confirm_close" not in st.session_state:
+                    st.session_state["confirm_close"] = False
+                if "confirm_anular" not in st.session_state:
+                    st.session_state["confirm_anular"] = False
+                if "confirm_clonar" not in st.session_state:
+                    st.session_state["confirm_clonar"] = False
+                if "confirm_pagar" not in st.session_state:
+                    st.session_state["confirm_pagar"] = False
+
                 col_c1, col_c2, col_c3 = st.columns(3)
                 
                 with col_c1:
                     if period["status"] == "borrador" and can_write:
                         if st.button("🔒 CERRAR PLANILLA (Bloquear Edición)", use_container_width=True, type="secondary"):
-                            if st.checkbox("Confirmar cierre definitivo de planilla"):
-                                try:
-                                    close_payroll(period["id"], user["id"])
-                                    st.success("Planilla cerrada. Edición bloqueada.")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(str(e))
+                            st.session_state["confirm_close"] = True
+                            st.session_state["confirm_anular"] = False
+                            st.session_state["confirm_clonar"] = False
+                            st.session_state["confirm_pagar"] = False
                     elif period["status"] == "cerrada" and can_write:
                         st.info("Planilla Cerrada. Lista para el pago.")
                         if st.button("💵 MARCAR COMO TOTALMENTE PAGADA", use_container_width=True, type="primary"):
-                            if st.checkbox("Confirmar que se realizaron todas las transferencias"):
-                                try:
-                                    mark_payroll_as_paid(period["id"], user["id"])
-                                    st.success("¡Planilla marcada como pagada!")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(str(e))
+                            st.session_state["confirm_pagar"] = True
+                            st.session_state["confirm_close"] = False
+                            st.session_state["confirm_anular"] = False
+                            st.session_state["confirm_clonar"] = False
                     elif period["status"] == "pagada":
                         st.success("Planilla Pagada exitosamente.")
                         
                 with col_c2:
                     if period["status"] in ("borrador", "cerrada") and can_write:
                         if st.button("❌ ANULAR PLANILLA", use_container_width=True):
-                            if st.checkbox("Confirmar anulación (la planilla no podrá editarse)"):
-                                try:
-                                    supabase.table("payroll_periods").update({"status": "anulada"}).eq("id", period["id"]).execute()
-                                    st.success("Planilla anulada.")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(str(e))
+                            st.session_state["confirm_anular"] = True
+                            st.session_state["confirm_close"] = False
+                            st.session_state["confirm_clonar"] = False
+                            st.session_state["confirm_pagar"] = False
                                     
                 with col_c3:
-                    # Duplicate option
                     if can_write:
                         if st.button("👥 CLONAR / DUPLICAR HORAS A NUEVA SEMANA", use_container_width=True):
-                            st.info("Esto cargará las horas de esta planilla como base en una nueva planilla.")
-                            dup_date = st.date_input("Fecha de pago para la nueva planilla clonada:", value=datetime.date.today())
-                            if st.button("Confirmar Clonación"):
-                                try:
-                                    # Create new period
-                                    new_p = create_payroll_period(dup_date, user["id"])
-                                    # Copy hours from old entries to new entries
-                                    new_entries = supabase.table("payroll_entries").select("*").eq("payroll_period_id", new_p["id"]).execute().data
-                                    
-                                    new_entries_hours = {}
-                                    for n_entry in new_entries:
-                                        # Find matching original entry by worker name
-                                        orig_ent = [o for o in entries if o["employee_id"] == n_entry["employee_id"]]
-                                        if orig_ent:
-                                            orig_ent = orig_ent[0]
-                                            # Fetch day hours
-                                            o_days = supabase.table("payroll_days").select("day_name, hours_worked").eq("payroll_entry_id", orig_ent["id"]).execute().data
-                                            new_entries_hours[n_entry["id"]] = {d["day_name"]: float(d["hours_worked"]) for d in o_days}
-                                            new_entries_hours[n_entry["id"]]["notes"] = f"Clonado de planilla {period['payment_date']}"
-                                            
-                                    save_payroll_draft(new_p["id"], new_entries_hours, user["id"])
-                                    st.success("¡Planilla clonada exitosamente!")
-                                    st.session_state["active_period_id"] = new_p["id"]
-                                    st.rerun()
-                                except Exception as e:
+                            st.session_state["confirm_clonar"] = True
+                            st.session_state["confirm_close"] = False
+                            st.session_state["confirm_anular"] = False
+                            st.session_state["confirm_pagar"] = False
+
+                # --- Confirmation Forms ---
+                if st.session_state["confirm_close"]:
+                    st.markdown("---")
+                    st.warning("⚠️ **Confirmación de Cierre**: Al cerrar la planilla, se bloqueará la edición de horas y asistencia.")
+                    cc_col1, cc_col2 = st.columns(2)
+                    if cc_col1.button("Confirmar Cierre Definitivo", use_container_width=True, type="primary"):
+                        try:
+                            close_payroll(period["id"], user["id"])
+                            st.session_state["confirm_close"] = False
+                            st.success("Planilla cerrada. Edición bloqueada.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+                    if cc_col2.button("Cancelar Cierre", use_container_width=True):
+                        st.session_state["confirm_close"] = False
+                        st.rerun()
+
+                if st.session_state["confirm_pagar"]:
+                    st.markdown("---")
+                    st.warning("⚠️ **Confirmación de Pago**: Esto marcará la planilla y a todos los trabajadores como pagados.")
+                    cp_col1, cp_col2 = st.columns(2)
+                    if cp_col1.button("Confirmar Pago de Planilla", use_container_width=True, type="primary"):
+                        try:
+                            mark_payroll_as_paid(period["id"], user["id"])
+                            st.session_state["confirm_pagar"] = False
+                            st.success("¡Planilla marcada como pagada!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+                    if cp_col2.button("Cancelar Pago", use_container_width=True):
+                        st.session_state["confirm_pagar"] = False
+                        st.rerun()
+
+                if st.session_state["confirm_anular"]:
+                    st.markdown("---")
+                    st.error("⚠️ **Confirmación de Anulación**: ¿Está seguro de que desea anular esta planilla? Esta acción no se puede deshacer.")
+                    ca_col1, ca_col2 = st.columns(2)
+                    if ca_col1.button("Confirmar Anulación de Planilla", use_container_width=True, type="primary"):
+                        try:
+                            supabase.table("payroll_periods").update({"status": "anulada"}).eq("id", period["id"]).execute()
+                            st.session_state["confirm_anular"] = False
+                            st.success("Planilla anulada.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+                    if ca_col2.button("Cancelar Anulación", use_container_width=True):
+                        st.session_state["confirm_anular"] = False
+                        st.rerun()
+
+                if st.session_state["confirm_clonar"]:
+                    st.markdown("---")
+                    st.info("ℹ️ **Clonar Planilla**: Copiará las horas trabajadas en esta planilla a una nueva semana.")
+                    
+                    with st.form("form_clonar"):
+                        dup_date = st.date_input("Fecha de pago para la nueva planilla clonada:", value=datetime.date.today())
+                        is_test_dup = st.checkbox("¿Es planilla de prueba?", value=False)
+                        
+                        c_col1, c_col2 = st.columns(2)
+                        submit_clonar = c_col1.form_submit_button("Confirmar Clonación", use_container_width=True)
+                        cancel_clonar = c_col2.form_submit_button("Cancelar", use_container_width=True)
+                        
+                    if submit_clonar:
+                        try:
+                            with st.spinner("Clonando planilla..."):
+                                curr_employee_ids = [e["employee_id"] for e in entries]
+                                new_p = create_payroll_period(dup_date, user["id"], employee_ids=curr_employee_ids, is_test=is_test_dup)
+                                
+                                new_entries = supabase.table("payroll_entries").select("*").eq("payroll_period_id", new_p["id"]).execute().data
+                                
+                                new_entries_hours = {}
+                                for n_entry in new_entries:
+                                    orig_ent = [o for o in entries if o["employee_id"] == n_entry["employee_id"]]
+                                    if orig_ent:
+                                        orig_ent = orig_ent[0]
+                                        o_days = supabase.table("payroll_days").select("day_name, hours_worked").eq("payroll_entry_id", orig_ent["id"]).execute().data
+                                        new_entries_hours[n_entry["id"]] = {d["day_name"]: float(d["hours_worked"]) for d in o_days}
+                                        new_entries_hours[n_entry["id"]]["notes"] = f"Clonado de planilla {period['payment_date']}"
+                                        
+                                save_payroll_draft(new_p["id"], new_entries_hours, user["id"])
+                                
+                            st.session_state["confirm_clonar"] = False
+                            st.success("¡Planilla clonada exitosamente!")
+                            st.session_state["active_period_id"] = new_p["id"]
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+                            
+                    if cancel_clonar:
+                        st.session_state["confirm_clonar"] = False
+                        st.rerun()     except Exception as e:
                                     st.error(str(e))
                                     
                 # --- EXPORTS & DOWNLOADS ---

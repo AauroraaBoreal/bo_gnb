@@ -46,6 +46,7 @@ class MockTable:
     def __init__(self, data=None):
         self.data = data if data is not None else []
         self._eq_filters = {}
+        self._in_filters = {}
         self._order_by = None
         self._limit = None
 
@@ -58,6 +59,9 @@ class MockTable:
     def neq(self, *args, **kwargs): return self
     def gt(self, *args, **kwargs): return self
     def lt(self, *args, **kwargs): return self
+    def in_(self, field, values, *args, **kwargs):
+        self._in_filters[field] = values
+        return self
     def order(self, field, desc=False, *args, **kwargs):
         self._order_by = (field, desc)
         return self
@@ -120,6 +124,11 @@ class MockTable:
         for field, value in self._eq_filters.items():
             filtered = [x for x in filtered if str(x.get(field)) == str(value)]
         self._eq_filters = {}
+        
+        for field, values in self._in_filters.items():
+            str_values = [str(v) for v in values]
+            filtered = [x for x in filtered if str(x.get(field)) in str_values]
+        self._in_filters = {}
         
         if self._order_by:
             field, desc = self._order_by

@@ -24,6 +24,7 @@ with col_left:
     try:
         periods_res = supabase.table("payroll_periods") \
             .select("payment_date, total_gross, total_net") \
+            .neq("is_test", True) \
             .order("payment_date") \
             .execute().data
             
@@ -83,17 +84,20 @@ with col_bottom1:
     st.subheader("⚠️ Pagos Pendientes a Trabajadores")
     try:
         pending_res = supabase.table("payroll_entries") \
-            .select("*, payroll_periods(title, payment_date)") \
+            .select("*, payroll_periods(title, payment_date, is_test)") \
             .eq("payment_status", "pendiente") \
             .execute().data
             
         if pending_res:
             p_rows = []
             for p in pending_res:
+                period_info = p.get("payroll_periods") or {}
+                if period_info.get("is_test", False):
+                    continue
                 p_rows.append({
                     "Trabajador": p["employee_name_snapshot"],
-                    "Semana Planilla": p["payroll_periods"]["title"],
-                    "Fecha Pago": p["payroll_periods"]["payment_date"],
+                    "Semana Planilla": period_info.get("title", ""),
+                    "Fecha Pago": period_info.get("payment_date", ""),
                     "Forma Pago": p["payment_method_snapshot"].upper(),
                     "Monto Neto": format_currency(float(p["net_total"]))
                 })
