@@ -258,43 +258,23 @@ def generate_docx_from_template(quotation_id: str, template_path: str, output_pa
         row_idx = template_idx
         
         for item in items:
-            desc = item["service_description"]
-            # Split lines for multi-line description support
-            lines = [line.strip() for line in desc.split("\n") if line.strip()]
-            if not lines:
-                lines = [""]
+            if row_idx >= len(items_table.rows):
+                items_table.add_row()
                 
-            start_row = row_idx
+            row = items_table.rows[row_idx]
             
-            for line in lines:
-                if row_idx >= len(items_table.rows):
-                    items_table.add_row()
-                    
-                row = items_table.rows[row_idx]
+            # Safe fill of cell contents
+            if len(row.cells) >= 5:
+                row.cells[0].text = str(item["item_order"])
+                row.cells[1].text = item["service_description"]
+                row.cells[2].text = f"{int(item['quantity'])} {item['unit']}"
+                row.cells[3].text = f"{float(item['unit_price']):,.2f}"
+                row.cells[4].text = f"{float(item['total']):,.2f}"
+            elif len(row.cells) > 1:
+                row.cells[0].text = str(item["item_order"])
+                row.cells[1].text = item["service_description"]
                 
-                # Safe fill of cell contents
-                if len(row.cells) >= 5:
-                    row.cells[0].text = str(item["item_order"])
-                    row.cells[1].text = line
-                    row.cells[2].text = f"{int(item['quantity'])} {item['unit']}"
-                    row.cells[3].text = f"{float(item['unit_price']):,.2f}"
-                    row.cells[4].text = f"{float(item['total']):,.2f}"
-                elif len(row.cells) > 1:
-                    row.cells[0].text = str(item["item_order"])
-                    row.cells[1].text = line
-                    
-                row_idx += 1
-                
-            end_row = row_idx - 1
-            
-            # Merge cells vertically in columns 0, 2, 3, and 4
-            if end_row > start_row:
-                for col in [0, 2, 3, 4]:
-                    if col < len(items_table.columns):
-                        first_cell = items_table.cell(start_row, col)
-                        for r in range(start_row + 1, end_row + 1):
-                            cell = items_table.cell(r, col)
-                            first_cell.merge(cell)
+            row_idx += 1
                             
     # Save the populated document
     doc.save(output_path)
@@ -471,8 +451,28 @@ def generate_pdf_from_quotation(quotation_id: str, output_path: str):
     def draw_watermark_cb(canvas, document):
         if watermark_image_path and os.path.exists(watermark_image_path):
             canvas.saveState()
-            # Draw image spanning the whole page (Letter size: width=612, height=792)
-            canvas.drawImage(watermark_image_path, 0, 0, width=letter[0], height=letter[1], mask='auto')
+            # 50% transparency
+            canvas.setFillAlpha(0.5)
+            canvas.setStrokeAlpha(0.5)
+            
+            # Center and rotate by 45 degrees (Letter size is 612x792)
+            page_width, page_height = letter
+            center_x = page_width / 2.0
+            center_y = page_height / 2.0
+            canvas.translate(center_x, center_y)
+            canvas.rotate(45)
+            
+            # Slightly larger (width and height 520)
+            img_w = 520
+            img_h = 520
+            canvas.drawImage(
+                watermark_image_path,
+                -img_w / 2.0,
+                -img_h / 2.0,
+                width=img_w,
+                height=img_h,
+                mask='auto'
+            )
             canvas.restoreState()
             
     if watermark_image_path:
