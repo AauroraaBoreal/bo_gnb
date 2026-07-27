@@ -126,7 +126,7 @@ def calculate_employee_totals(entry_id: str):
     hourly_rate = float(entry["hourly_rate_snapshot"])
     
     for day in days:
-        hours = float(day["hours_worked"])
+        hours = float(day["hours_worked"] or 0.0)
         multiplier = float(day["multiplier"])
         
         if w_type in ("operario_fijo", "jefe"):
@@ -199,7 +199,7 @@ def save_payroll_draft(period_id: str, entries_hours: dict, user_id: str = None)
     for entry_id, days_data in entries_hours.items():
         # Update daily hours
         for day_name in ["martes", "miercoles", "jueves", "viernes", "sabado", "domingo", "lunes"]:
-            hours = float(days_data.get(day_name, 0.00))
+            hours = float(days_data.get(day_name, 0.00) or 0.00)
             # Update hours_worked for this day
             supabase.table("payroll_days") \
                 .update({"hours_worked": hours}) \

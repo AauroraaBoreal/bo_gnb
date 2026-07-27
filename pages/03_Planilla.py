@@ -28,6 +28,15 @@ user = st.session_state.user
 can_write = check_permission(["admin", "jefe"])
 supabase = get_supabase_client()
 
+# Helper to highlight zero values in red
+def highlight_zeros(val):
+    try:
+        if val is not None and float(val) == 0.0:
+            return 'background-color: #ffebee; color: #c62828; font-weight: bold;'
+    except (ValueError, TypeError):
+        pass
+    return ''
+
 # Callbacks for st.data_editor auto-save
 def save_matrix_changes():
     editor_state = st.session_state.get("payroll_matrix_editor")
@@ -55,7 +64,8 @@ def save_matrix_changes():
         day_names = ["Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo", "Lunes"]
         for day in day_names:
             if day in changes:
-                hours = float(changes[day])
+                val = changes[day]
+                hours = float(val) if val is not None else 0.0
                 day_name_lower = day.lower()
                 client.table("payroll_days") \
                     .update({"hours_worked": hours}) \
@@ -103,7 +113,8 @@ def save_payments_changes():
         
         # 1. Update Descuento/Ajuste if changed
         if "Descuento / Ajuste" in changes:
-            new_adj_amount = float(changes["Descuento / Ajuste"])
+            val = changes["Descuento / Ajuste"]
+            new_adj_amount = float(val) if val is not None else 0.0
             
             # Find sum of other (non-manual) adjustments
             all_adjs = client.table("payroll_adjustments") \
@@ -319,7 +330,7 @@ with tab_active:
                         .select("day_name, hours_worked") \
                         .eq("payroll_entry_id", entry["id"]) \
                         .execute().data
-                    days_hours = {d["day_name"]: float(d["hours_worked"]) for d in days}
+                    days_hours = {d["day_name"]: float(d["hours_worked"] or 0.0) for d in days}
                     
                     matrix_data.append({
                         "id": entry["id"],
@@ -349,9 +360,15 @@ with tab_active:
                 # Store matrix in session state for callback reference
                 st.session_state["current_matrix_df"] = df_matrix
                 
+                # Apply styling to highlight zeros in red
+                styled_matrix = df_matrix.style.map(
+                    highlight_zeros,
+                    subset=["Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo", "Lunes", "Bruto", "Neto"]
+                )
+                
                 # Data Editor
                 edited_df = st.data_editor(
-                    df_matrix,
+                    styled_matrix,
                     column_config={
                         "id": None, # Hide ID
                         "Nombre": st.column_config.TextColumn("Trabajador", disabled=True),
@@ -702,7 +719,7 @@ with tab_active:
                                     if orig_ent:
                                         orig_ent = orig_ent[0]
                                         o_days = supabase.table("payroll_days").select("day_name, hours_worked").eq("payroll_entry_id", orig_ent["id"]).execute().data
-                                        new_entries_hours[n_entry["id"]] = {d["day_name"]: float(d["hours_worked"]) for d in o_days}
+                                        new_entries_hours[n_entry["id"]] = {d["day_name"]: float(d["hours_worked"] or 0.0) for d in o_days}
                                         new_entries_hours[n_entry["id"]]["notes"] = f"Clonado de planilla {period['payment_date']}"
                                         
                                 save_payroll_draft(new_p["id"], new_entries_hours, user["id"])
@@ -815,10 +832,16 @@ with tab_pay_details:
         # Store in session state for callback reference
         st.session_state["current_pay_df"] = df_pay
         
+        # Apply styling to highlight zeros in red
+        styled_pay = df_pay.style.map(
+            highlight_zeros,
+            subset=["Total Bruto", "Neto Final"]
+        )
+        
         is_editable = (period["status"] in ("borrador", "cerrada") and can_write)
         
         edited_pay_df = st.data_editor(
-            df_pay,
+            styled_pay,
             column_config={
                 "id": None, # Hide ID
                 "Personal": st.column_config.TextColumn("Personal", disabled=True),

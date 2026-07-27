@@ -575,10 +575,10 @@ def export_payroll_excel(payroll_period_id: str, output_path: str):
         # Hours per day
         days_list = ["martes", "miercoles", "jueves", "viernes", "sabado", "domingo", "lunes"]
         for idx, day in enumerate(days_list, 5):
-            ws.cell(row=current_row, column=idx, value=float(days_dict.get(day, 0.0)))
+            ws.cell(row=current_row, column=idx, value=float(days_dict.get(day, 0.0) or 0.0))
             
         # Sum of hours
-        total_hours = sum(float(days_dict.get(d, 0.0)) for d in days_list)
+        total_hours = sum(float(days_dict.get(d, 0.0) or 0.0) for d in days_list)
         ws.cell(row=current_row, column=12, value=total_hours)
         
         # Style the hours row
@@ -604,7 +604,7 @@ def export_payroll_excel(payroll_period_id: str, output_path: str):
         
         # Pay per day
         for idx, day in enumerate(days_list, 5):
-            ws.cell(row=current_row, column=idx, value=float(days_pay_dict.get(day, 0.0))).number_format = '0.00'
+            ws.cell(row=current_row, column=idx, value=float(days_pay_dict.get(day, 0.0) or 0.0)).number_format = '0.00'
             
         # Gross Sum
         ws.cell(row=current_row, column=12, value=float(entry["gross_total"])).number_format = '0.00'
