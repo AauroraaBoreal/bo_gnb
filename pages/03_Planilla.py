@@ -88,6 +88,10 @@ def save_matrix_changes():
             
     if updated_any:
         calculate_payroll_totals(st.session_state["active_period_id"])
+        # Reset the edited rows to clear the None visual state and force rendering the database's 0.0 values
+        if "payroll_matrix_editor" in st.session_state:
+            st.session_state["payroll_matrix_editor"]["edited_rows"] = {}
+        st.rerun()
 
 def save_payments_changes():
     editor_state = st.session_state.get("payroll_payments_editor")
@@ -180,6 +184,10 @@ def save_payments_changes():
             
     if updated_any:
         calculate_payroll_totals(st.session_state["active_period_id"])
+        # Reset the edited rows to clear the None visual state and force rendering the database's 0.0 values
+        if "payroll_payments_editor" in st.session_state:
+            st.session_state["payroll_payments_editor"]["edited_rows"] = {}
+        st.rerun()
 
 # Fetch all periods to populate selectors
 try:
@@ -363,7 +371,7 @@ with tab_active:
                 # Apply styling to highlight zeros in red
                 styled_matrix = df_matrix.style.map(
                     highlight_zeros,
-                    subset=["Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo", "Lunes", "Bruto", "Neto"]
+                    subset=["Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo", "Lunes"]
                 )
                 
                 # Data Editor
@@ -832,16 +840,10 @@ with tab_pay_details:
         # Store in session state for callback reference
         st.session_state["current_pay_df"] = df_pay
         
-        # Apply styling to highlight zeros in red
-        styled_pay = df_pay.style.map(
-            highlight_zeros,
-            subset=["Total Bruto", "Neto Final"]
-        )
-        
         is_editable = (period["status"] in ("borrador", "cerrada") and can_write)
         
         edited_pay_df = st.data_editor(
-            styled_pay,
+            df_pay,
             column_config={
                 "id": None, # Hide ID
                 "Personal": st.column_config.TextColumn("Personal", disabled=True),
