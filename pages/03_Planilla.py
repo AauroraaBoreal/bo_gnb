@@ -28,10 +28,17 @@ user = st.session_state.user
 can_write = check_permission(["admin", "jefe"])
 supabase = get_supabase_client()
 
-# Helper to highlight zero values in red
+# Initialize session state versions for widgets to force refresh when data is updated
+if "matrix_editor_version" not in st.session_state:
+    st.session_state["matrix_editor_version"] = 0
+if "payments_editor_version" not in st.session_state:
+    st.session_state["payments_editor_version"] = 0
+
+# Helper to highlight zero values in red (used for non-editable styling if applicable)
 def highlight_zeros(val):
     try:
-        if val is not None and float(val) == 0.0:
+        val_str = str(val).replace("🔴", "").strip()
+        if val_str and float(val_str) == 0.0:
             return 'background-color: #ffebee; color: #c62828; font-weight: bold;'
     except (ValueError, TypeError):
         pass
@@ -39,7 +46,8 @@ def highlight_zeros(val):
 
 # Callbacks for st.data_editor auto-save
 def save_matrix_changes():
-    editor_state = st.session_state.get("payroll_matrix_editor")
+    version = st.session_state.get("matrix_editor_version", 0)
+    editor_state = st.session_state.get(f"payroll_matrix_editor_{version}")
     if not editor_state:
         return
         
@@ -65,7 +73,17 @@ def save_matrix_changes():
         for day in day_names:
             if day in changes:
                 val = changes[day]
-                hours = float(val) if val is not None else 0.0
+                if val is None:
+                    hours = 0.0
+                else:
+                    val_str = str(val).strip().replace("🔴", "").strip()
+                    if not val_str or val_str.lower() in ("none", "nan", "null"):
+                        hours = 0.0
+                    else:
+                        try:
+                            hours = float(val_str)
+                        except ValueError:
+                            hours = 0.0
                 day_name_lower = day.lower()
                 client.table("payroll_days") \
                     .update({"hours_worked": hours}) \
@@ -88,13 +106,13 @@ def save_matrix_changes():
             
     if updated_any:
         calculate_payroll_totals(st.session_state["active_period_id"])
-        # Reset the edited rows to clear the None visual state and force rendering the database's 0.0 values
-        if "payroll_matrix_editor" in st.session_state:
-            st.session_state["payroll_matrix_editor"]["edited_rows"] = {}
+        # Increment version to force data_editor re-mount and show updated values
+        st.session_state["matrix_editor_version"] += 1
         st.rerun()
 
 def save_payments_changes():
-    editor_state = st.session_state.get("payroll_payments_editor")
+    version = st.session_state.get("payments_editor_version", 0)
+    editor_state = st.session_state.get(f"payroll_payments_editor_{version}")
     if not editor_state:
         return
         
@@ -184,9 +202,8 @@ def save_payments_changes():
             
     if updated_any:
         calculate_payroll_totals(st.session_state["active_period_id"])
-        # Reset the edited rows to clear the None visual state and force rendering the database's 0.0 values
-        if "payroll_payments_editor" in st.session_state:
-            st.session_state["payroll_payments_editor"]["edited_rows"] = {}
+        # Increment version to force payments_editor re-mount and show updated values
+        st.session_state["payments_editor_version"] += 1
         st.rerun()
 
 # Fetch all periods to populate selectors
@@ -345,13 +362,13 @@ with tab_active:
                         "Nombre": entry["employee_name_snapshot"],
                         "Tipo": entry["worker_type_snapshot"].replace("operario_fijo", "fijo").upper(),
                         "Tarifa Día": float(entry["daily_rate_snapshot"]),
-                        "Martes": days_hours.get("martes", 0.0),
-                        "Miercoles": days_hours.get("miercoles", 0.0),
-                        "Jueves": days_hours.get("jueves", 0.0),
-                        "Viernes": days_hours.get("viernes", 0.0),
-                        "Sabado": days_hours.get("sabado", 0.0),
-                        "Domingo": days_hours.get("domingo", 0.0),
-                        "Lunes": days_hours.get("lunes", 0.0),
+                        "Martes": "🔴 0" if days_hours.get("martes", 0.0) == 0.0 else str(days_hours.get("martes", 0.0)),
+                        "Miercoles": "🔴 0" if days_hours.get("miercoles", 0.0) == 0.0 else str(days_hours.get("miercoles", 0.0)),
+                        "Jueves": "🔴 0" if days_hours.get("jueves", 0.0) == 0.0 else str(days_hours.get("jueves", 0.0)),
+                        "Viernes": "🔴 0" if days_hours.get("viernes", 0.0) == 0.0 else str(days_hours.get("viernes", 0.0)),
+                        "Sabado": "🔴 0" if days_hours.get("sabado", 0.0) == 0.0 else str(days_hours.get("sabado", 0.0)),
+                        "Domingo": "🔴 0" if days_hours.get("domingo", 0.0) == 0.0 else str(days_hours.get("domingo", 0.0)),
+                        "Lunes": "🔴 0" if days_hours.get("lunes", 0.0) == 0.0 else str(days_hours.get("lunes", 0.0)),
                         "Bruto": float(entry["gross_total"]),
                         "Ajustes": float(entry["adjustment_total"]),
                         "Neto": float(entry["net_total"]),
@@ -368,27 +385,22 @@ with tab_active:
                 # Store matrix in session state for callback reference
                 st.session_state["current_matrix_df"] = df_matrix
                 
-                # Apply styling to highlight zeros in red
-                styled_matrix = df_matrix.style.map(
-                    highlight_zeros,
-                    subset=["Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo", "Lunes"]
-                )
-                
                 # Data Editor
+                version = st.session_state.get("matrix_editor_version", 0)
                 edited_df = st.data_editor(
-                    styled_matrix,
+                    df_matrix,
                     column_config={
                         "id": None, # Hide ID
                         "Nombre": st.column_config.TextColumn("Trabajador", disabled=True),
                         "Tipo": st.column_config.TextColumn("Tipo", disabled=True),
                         "Tarifa Día": st.column_config.NumberColumn("Sueldo Día", disabled=True, format="S/ %.2f"),
-                        "Martes": st.column_config.NumberColumn("Mar", min_value=0.0, max_value=24.0, step=0.5, disabled=not is_editable),
-                        "Miercoles": st.column_config.NumberColumn("Mie", min_value=0.0, max_value=24.0, step=0.5, disabled=not is_editable),
-                        "Jueves": st.column_config.NumberColumn("Jue", min_value=0.0, max_value=24.0, step=0.5, disabled=not is_editable),
-                        "Viernes": st.column_config.NumberColumn("Vie", min_value=0.0, max_value=24.0, step=0.5, disabled=not is_editable),
-                        "Sabado": st.column_config.NumberColumn("Sab", min_value=0.0, max_value=24.0, step=0.5, disabled=not is_editable),
-                        "Domingo": st.column_config.NumberColumn("Dom (2x)", min_value=0.0, max_value=24.0, step=0.5, disabled=not is_editable),
-                        "Lunes": st.column_config.NumberColumn("Lun", min_value=0.0, max_value=24.0, step=0.5, disabled=not is_editable),
+                        "Martes": st.column_config.TextColumn("Mar", disabled=not is_editable),
+                        "Miercoles": st.column_config.TextColumn("Mie", disabled=not is_editable),
+                        "Jueves": st.column_config.TextColumn("Jue", disabled=not is_editable),
+                        "Viernes": st.column_config.TextColumn("Vie", disabled=not is_editable),
+                        "Sabado": st.column_config.TextColumn("Sab", disabled=not is_editable),
+                        "Domingo": st.column_config.TextColumn("Dom (2x)", disabled=not is_editable),
+                        "Lunes": st.column_config.TextColumn("Lun", disabled=not is_editable),
                         "Bruto": st.column_config.NumberColumn("Bruto Calc.", disabled=True, format="S/ %.2f"),
                         "Ajustes": st.column_config.NumberColumn("Ajustes", disabled=True, format="S/ %.2f"),
                         "Neto": st.column_config.NumberColumn("Neto Final", disabled=True, format="S/ %.2f"),
@@ -396,7 +408,7 @@ with tab_active:
                     },
                     hide_index=True,
                     use_container_width=True,
-                    key="payroll_matrix_editor",
+                    key=f"payroll_matrix_editor_{version}",
                     on_change=save_matrix_changes
                 )
                 
@@ -842,6 +854,7 @@ with tab_pay_details:
         
         is_editable = (period["status"] in ("borrador", "cerrada") and can_write)
         
+        version = st.session_state.get("payments_editor_version", 0)
         edited_pay_df = st.data_editor(
             df_pay,
             column_config={
@@ -855,7 +868,7 @@ with tab_pay_details:
             },
             hide_index=True,
             use_container_width=True,
-            key="payroll_payments_editor",
+            key=f"payroll_payments_editor_{version}",
             on_change=save_payments_changes
         )
         
