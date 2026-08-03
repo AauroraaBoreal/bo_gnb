@@ -1004,6 +1004,14 @@ with tab_attendance:
         period = supabase.table("payroll_periods").select("*").eq("id", selected_period_id).execute().data[0]
         is_editable = (period["status"] == "borrador" and can_write)
         
+        # Display period name and type
+        st.markdown(f"### 📂 Gestionando Fotos para: **{period['title']}**")
+        is_test_val = period.get("is_test", False)
+        if is_test_val:
+            st.warning("⚠️ **ESTA PLANILLA ESTÁ MARCADA COMO PRUEBA** (Los cambios en asistencia no afectarán a los reportes de producción).")
+        else:
+            st.success("💼 **ESTA PLANILLA ES DE PRODUCCIÓN (REAL)** (Las horas y cálculos afectarán a los reportes acumulados de la empresa).")
+        
         # --- Gemini API Key Section ---
         # Look in secrets, env, or session_state safely
         api_key_stored = ""
@@ -1034,156 +1042,157 @@ with tab_attendance:
             st.markdown(
                 """
                 <div style='font-size: 0.85em; color: #666; margin-top: 10px;'>
-                    ¿No tienes una clave? Consíguela gratis en <a href="https://aistudio.google.com/" target="_blank">Google AI Studio</a>.
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+                           # --- Weekly Calendar Selector ---
+        period_start = datetime.datetime.strptime(period["period_start"], "%Y-%m-%d").date()
+        day_names_es = ["Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo", "Lunes"]
+        day_names_short = ["MAR", "MIE", "JUE", "VIE", "SAB", "DOM", "LUN"]
         
-        # --- Upload Attendance Sheet Section ---
-        if is_editable:
-            with st.expander("➕ Subir Nueva Foto de Asistencia"):
-                day_names_es = ["Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo", "Lunes"]
-                selected_day = st.selectbox("Seleccione el día de la semana correspondiente a la foto:", options=day_names_es)
+        if "selected_attendance_day" not in st.session_state:
+            st.session_state["selected_attendance_day"] = "martes"
+            
+        selected_day = st.session_state["selected_attendance_day"]
+        
+        # Load photos list from storage to know which days have uploads
+        storage_path = f"attendance/{selected_period_id}"
+        try:
+            files_list = supabase.storage.from_("vouchers").list(path=storage_path)
+            files = [f for f in files_list if isinstance(f, dict) and f.get("name") != ".emptyFolderPlaceholder"]
+        except Exception:
+            files = []
+            
+        uploaded_days_map = {} # day_lower -> file dict
+        for f in files:
+            day_key = f["name"].split("_")[0]
+            uploaded_days_map[day_key] = f
+            
+        st.markdown("#### 📅 Calendario Semanal de Asistencia")
+        st.caption("Seleccione un día para gestionar su foto de asistencia:")
+        
+        cols = st.columns(7)
+        for i in range(7):
+            day_name_lower = day_names_es[i].lower()
+            day_date = period_start + datetime.timedelta(days=i)
+            
+            # Indicator in label if photo is uploaded
+            indicator = "📷" if day_name_lower in uploaded_days_map else "⚪"
+            label = f"**{day_names_short[i]} {day_date.day}**\n\n({indicator})"
+            
+            is_selected = (selected_day == day_name_lower)
+            btn_type = "primary" if is_selected else "secondary"
+            
+            with cols[i]:
+                if st.button(label, key=f"cal_btn_{day_name_lower}", use_container_width=True, type=btn_type):
+                    st.session_state["selected_attendance_day"] = day_name_lower
+                    st.rerun()
+                    
+        st.markdown("---")
+        
+        # --- Selected Day Content ---
+        day_display = selected_day.capitalize()
+        st.markdown(f"### 📂 Asistencia del día: **{day_display}**")
+        
+        if selected_day in uploaded_days_map:
+            # A photo is already uploaded for this day
+            file = uploaded_days_map[selected_day]
+            filename = file["name"]
+            
+            try:
+                timestamp_str = filename.split("_")[1].split(".")[0]
+                upload_time = datetime.datetime.strptime(timestamp_str, "%Y%m%d%H%M%S").strftime("%d/%m/%Y %H:%M:%S")
+            except Exception:
+                upload_time = file.get("created_at", "Desconocido")
                 
-                uploaded_photo = st.file_uploader("Seleccione imagen de asistencia (PNG, JPG, JPEG):", type=["png", "jpg", "jpeg"], key="attendance_photo_uploader")
+            file_url = supabase.storage.from_("vouchers").get_public_url(f"{storage_path}/{filename}")
+            
+            col_img, col_actions = st.columns([1, 1])
+            with col_img:
+                st.image(file_url, caption=f"Foto de Asistencia - {day_display}", use_container_width=True)
                 
-                if uploaded_photo and st.button("Guardar Foto de Asistencia", use_container_width=True):
-                    with st.spinner("Subiendo foto a Supabase Storage..."):
-                        # Get file extension
+            with col_actions:
+                st.markdown("#### Acciones Disponibles")
+                st.info(f"Subido el: {upload_time}")
+                
+                # Parse with AI Button
+                if not api_key_stored:
+                    st.warning("⚠️ Configure la API Key de Gemini para activar el análisis con IA.")
+                else:
+                    if st.button("🤖 Digitalizar Asistencia con IA", use_container_width=True, type="primary"):
+                        with st.spinner("Descargando imagen y procesando con Gemini..."):
+                            try:
+                                image_bytes = supabase.storage.from_("vouchers").download(f"{storage_path}/{filename}")
+                                ext = filename.split(".")[-1].lower()
+                                mime_type = "image/png" if ext == "png" else "image/jpeg"
+                                
+                                # Get active employees
+                                entries = supabase.table("payroll_entries") \
+                                    .select("employee_name_snapshot, id") \
+                                    .eq("payroll_period_id", selected_period_id) \
+                                    .order("employee_name_snapshot") \
+                                    .execute().data
+                                employee_names = [e["employee_name_snapshot"] for e in entries]
+                                
+                                # Run Gemini parser
+                                parsed_data = parse_attendance_image(
+                                    image_bytes=image_bytes,
+                                    mime_type=mime_type,
+                                    employee_names=employee_names,
+                                    api_key=api_key_stored
+                                )
+                                
+                                st.session_state["attendance_parsed_results"] = parsed_data.get("attendance", [])
+                                st.session_state["attendance_parsed_day"] = selected_day
+                                st.success("¡Digitalización completada! Revisa los resultados abajo.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error durante el procesamiento con IA: {str(e)}")
+                                
+                # Delete Button
+                if is_editable:
+                    if st.button("🗑️ Eliminar Foto de Asistencia", use_container_width=True, type="secondary"):
+                        with st.spinner("Eliminando archivo..."):
+                            try:
+                                supabase.storage.from_("vouchers").remove([f"{storage_path}/{filename}"])
+                                st.success("Foto eliminada correctamente.")
+                                if "attendance_parsed_day" in st.session_state and st.session_state["attendance_parsed_day"] == selected_day:
+                                    del st.session_state["attendance_parsed_results"]
+                                    del st.session_state["attendance_parsed_day"]
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error al eliminar: {str(e)}")
+        else:
+            # No photo uploaded for this day
+            if is_editable:
+                st.info(f"No hay fotos subidas para el **{day_display}**. Suba una foto de asistencia a continuación:")
+                
+                uploaded_photo = st.file_uploader(
+                    f"Seleccione la foto para el {day_display} (PNG, JPG, JPEG):",
+                    type=["png", "jpg", "jpeg"],
+                    key=f"uploader_{selected_day}"
+                )
+                
+                if uploaded_photo and st.button(f"Guardar Foto para el {day_display}", use_container_width=True):
+                    with st.spinner("Subiendo foto a Supabase..."):
                         ext = uploaded_photo.name.split(".")[-1]
-                        day_lower = selected_day.lower()
-                        remote_name = f"attendance/{selected_period_id}/{day_lower}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.{ext}"
+                        remote_name = f"attendance/{selected_period_id}/{selected_day}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.{ext}"
                         
-                        # Write to temp file
                         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
                             tmp.write(uploaded_photo.read())
                             tmp_path = tmp.name
                             
                         try:
-                            # Upload to 'vouchers' bucket under the attendance folder structure
-                            public_url = upload_document_to_supabase_storage(tmp_path, "vouchers", remote_name)
-                            st.success(f"¡Foto de asistencia para el {selected_day} guardada exitosamente!")
+                            upload_document_to_supabase_storage(tmp_path, "vouchers", remote_name)
+                            st.success(f"¡Foto de asistencia para el {day_display} guardada!")
                             os.remove(tmp_path)
                             st.rerun()
                         except Exception as e:
-                            st.error(f"Error al subir la imagen: {str(e)}")
+                            st.error(f"Error al subir: {str(e)}")
                             if os.path.exists(tmp_path):
                                 os.remove(tmp_path)
-        else:
-            if not can_write:
-                st.info("No tienes permisos de edición para subir fotos de asistencia.")
             else:
-                st.info("Esta planilla no está en borrador (la edición está cerrada o pagada).")
+                st.info(f"No hay fotos subidas para el **{day_display}** y la edición de esta planilla está cerrada.")
                 
-        # --- List Uploaded Photos and AI Action ---
-        st.markdown("---")
-        st.markdown("### 🔍 Fotos de Asistencia Subidas para esta Semana")
-        
-        try:
-            # List files from 'vouchers' bucket at path 'attendance/{period_id}'
-            storage_path = f"attendance/{selected_period_id}"
-            files_list = supabase.storage.from_("vouchers").list(path=storage_path)
-            
-            # Filter out directories and only keep actual files
-            files = [f for f in files_list if isinstance(f, dict) and f.get("name") != ".emptyFolderPlaceholder"]
-            
-            if not files:
-                st.info("No se han subido fotos de asistencia para esta semana todavía.")
-            else:
-                # Group files by day for neat visualization
-                for idx, file in enumerate(files):
-                    filename = file["name"]
-                    # Extract day name from filename (e.g. "martes_20260729123000.jpg")
-                    day_part = filename.split("_")[0]
-                    day_disp = day_part.capitalize()
-                    
-                    # Formatting created date from metadata or filename timestamp
-                    try:
-                        timestamp_str = filename.split("_")[1].split(".")[0]
-                        upload_time = datetime.datetime.strptime(timestamp_str, "%Y%m%d%H%M%S").strftime("%d/%m/%Y %H:%M:%S")
-                    except Exception:
-                        upload_time = file.get("created_at", "Desconocido")
-                        
-                    # Get file URL
-                    file_url = supabase.storage.from_("vouchers").get_public_url(f"{storage_path}/{filename}")
-                    
-                    # Create container for each photo card
-                    with st.container():
-                        st.markdown(
-                            f"""
-                            <div style='background-color:#f9f9f9; padding: 12px; border-radius: 8px; border-left: 4px solid #4A90E2; margin-bottom: 10px;'>
-                                <b>Día:</b> {day_disp} | <b>Subido el:</b> {upload_time}
-                            </div>
-                            """, 
-                            unsafe_allow_html=True
-                        )
-                        
-                        col_img, col_actions = st.columns([1, 1])
-                        with col_img:
-                            st.image(file_url, caption=f"Asistencia de {day_disp}", use_container_width=True)
-                            
-                        with col_actions:
-                            st.markdown("#### Acciones")
-                            
-                            # Define unique keys for buttons
-                            btn_parse_key = f"parse_ai_{day_part}_{idx}"
-                            btn_delete_key = f"delete_ai_{day_part}_{idx}"
-                            
-                            # Parse with AI Action
-                            if not api_key_stored:
-                                st.warning("Configure la API Key de Gemini para activar el análisis con IA.")
-                            else:
-                                if st.button(f"🤖 Digitalizar Asistencia con IA ({day_disp})", key=btn_parse_key, use_container_width=True, type="primary"):
-                                    with st.spinner("Descargando imagen y procesando con Gemini..."):
-                                        try:
-                                            # Download image bytes
-                                            image_bytes = supabase.storage.from_("vouchers").download(f"{storage_path}/{filename}")
-                                            
-                                            # Determine mime type
-                                            ext = filename.split(".")[-1].lower()
-                                            mime_type = "image/png" if ext == "png" else "image/jpeg"
-                                            
-                                            # Get current active employees
-                                            entries = supabase.table("payroll_entries") \
-                                                .select("employee_name_snapshot, id") \
-                                                .eq("payroll_period_id", selected_period_id) \
-                                                .order("employee_name_snapshot") \
-                                                .execute().data
-                                            employee_names = [e["employee_name_snapshot"] for e in entries]
-                                            
-                                            # Run Gemini parsing
-                                            parsed_data = parse_attendance_image(
-                                                image_bytes=image_bytes,
-                                                mime_type=mime_type,
-                                                employee_names=employee_names,
-                                                api_key=api_key_stored
-                                            )
-                                            
-                                            st.session_state["attendance_parsed_results"] = parsed_data.get("attendance", [])
-                                            st.session_state["attendance_parsed_day"] = day_part
-                                            st.success("¡Digitalización completada! Revisa el resultado al final de la página.")
-                                            st.rerun()
-                                        except Exception as e:
-                                            st.error(f"Error durante el procesamiento con IA: {str(e)}")
-                                            
-                            # Delete Action
-                            if is_editable:
-                                if st.button(f"🗑️ Eliminar Foto ({day_disp})", key=btn_delete_key, use_container_width=True):
-                                    with st.spinner("Eliminando archivo..."):
-                                        try:
-                                            supabase.storage.from_("vouchers").remove([f"{storage_path}/{filename}"])
-                                            st.success("Foto eliminada correctamente.")
-                                            st.rerun()
-                                        except Exception as e:
-                                            st.error(f"Error al eliminar: {str(e)}")
-                            
-                            st.markdown("---")
-        except Exception as e:
-            st.error(f"Error al cargar fotos de asistencia: {str(e)}")
-            
         # --- Interactive Preview and Save Section ---
-        if "attendance_parsed_results" in st.session_state and st.session_state["attendance_parsed_results"]:
+        if "attendance_parsed_results" in st.session_state and st.session_state.get("attendance_parsed_day") == selected_day:
             parsed_results = st.session_state["attendance_parsed_results"]
             parsed_day = st.session_state["attendance_parsed_day"]
             
