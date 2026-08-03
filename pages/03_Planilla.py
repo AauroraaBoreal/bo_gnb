@@ -14,6 +14,33 @@ from lib.document_service import export_payroll_excel, export_payroll_pdf, uploa
 from lib.excel_importer import parse_and_import_excel_payroll
 from lib.utils import format_currency
 from lib.ai_service import parse_attendance_image
+from PIL import Image
+import io
+
+def compress_image(image_bytes: bytes, max_dim: int = 1200) -> bytes:
+    """
+    Compresses and resizes an image to speed up uploads and processing.
+    Converts RGBA to RGB and resizes if dimensions exceed max_dim.
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        width, height = img.size
+        if max(width, height) > max_dim:
+            if width > height:
+                new_width = max_dim
+                new_height = int(height * (max_dim / width))
+            else:
+                new_height = max_dim
+                new_width = int(width * (max_dim / height))
+            img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        out_bytes = io.BytesIO()
+        img.save(out_bytes, format="JPEG", quality=75, optimize=True)
+        return out_bytes.getvalue()
+    except Exception as e:
+        print(f"Error compressing image: {e}")
+        return image_bytes
 
 # Page Config
 st.set_page_config(page_title="Planilla Semanal - GNB", page_icon="💵", layout="wide")
@@ -1177,12 +1204,16 @@ with tab_attendance:
                 )
                 
                 if uploaded_photo and st.button(f"Guardar Foto para el {day_display}", use_container_width=True):
-                    with st.spinner("Subiendo foto a Supabase..."):
-                        ext = uploaded_photo.name.split(".")[-1]
-                        remote_name = f"attendance/{selected_period_id}/{selected_day}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.{ext}"
+                    with st.spinner("Procesando y subiendo foto a Supabase..."):
+                        # Read and compress image bytes to JPEG for optimized transfer speeds
+                        raw_bytes = uploaded_photo.read()
+                        compressed_bytes = compress_image(raw_bytes, max_dim=1600)
                         
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
-                            tmp.write(uploaded_photo.read())
+                        # Save with standard JPEG extension since compress_image outputs JPEG
+                        remote_name = f"attendance/{selected_period_id}/{selected_day}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
+                        
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                            tmp.write(compressed_bytes)
                             tmp_path = tmp.name
                             
                         try:
