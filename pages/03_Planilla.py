@@ -1005,8 +1005,15 @@ with tab_attendance:
         is_editable = (period["status"] == "borrador" and can_write)
         
         # --- Gemini API Key Section ---
-        # Look in secrets, env, or session_state
-        api_key_stored = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY") or st.session_state.get("gemini_api_key", "")
+        # Look in secrets, env, or session_state safely
+        api_key_stored = ""
+        try:
+            api_key_stored = st.secrets.get("GEMINI_API_KEY") or ""
+        except Exception:
+            pass
+        
+        if not api_key_stored:
+            api_key_stored = os.getenv("GEMINI_API_KEY") or st.session_state.get("gemini_api_key", "")
         
         col_key1, col_key2 = st.columns([2, 1])
         with col_key1:
