@@ -1042,7 +1042,13 @@ with tab_attendance:
             st.markdown(
                 """
                 <div style='font-size: 0.85em; color: #666; margin-top: 10px;'>
-                           # --- Weekly Calendar Selector ---
+                    ¿No tienes una clave? Consíguela gratis en <a href="https://aistudio.google.com/" target="_blank">Google AI Studio</a>.
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+        
+        # --- Weekly Calendar Selector ---
         period_start = datetime.datetime.strptime(period["period_start"], "%Y-%m-%d").date()
         day_names_es = ["Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo", "Lunes"]
         day_names_short = ["MAR", "MIE", "JUE", "VIE", "SAB", "DOM", "LUN"]
