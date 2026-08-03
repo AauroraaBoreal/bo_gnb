@@ -13,6 +13,7 @@ from lib.payroll_service import (
 from lib.document_service import export_payroll_excel, export_payroll_pdf, upload_document_to_supabase_storage
 from lib.excel_importer import parse_and_import_excel_payroll
 from lib.utils import format_currency
+from lib.ai_service import parse_attendance_image
 
 # Page Config
 st.set_page_config(page_title="Planilla Semanal - GNB", page_icon="💵", layout="wide")
@@ -106,9 +107,9 @@ def save_matrix_changes():
             
     if updated_any:
         calculate_payroll_totals(st.session_state["active_period_id"])
-        # Increment version to force data_editor re-mount and show updated values
-        st.session_state["matrix_editor_version"] += 1
-        st.rerun()
+        # Clear edited_rows to reset any None states and force editor to render fresh df_matrix
+        if f"payroll_matrix_editor_{version}" in st.session_state:
+            st.session_state[f"payroll_matrix_editor_{version}"]["edited_rows"] = {}
 
 def save_payments_changes():
     version = st.session_state.get("payments_editor_version", 0)
@@ -202,9 +203,9 @@ def save_payments_changes():
             
     if updated_any:
         calculate_payroll_totals(st.session_state["active_period_id"])
-        # Increment version to force payments_editor re-mount and show updated values
-        st.session_state["payments_editor_version"] += 1
-        st.rerun()
+        # Clear edited_rows to reset any None states and force editor to render fresh df_pay
+        if f"payroll_payments_editor_{version}" in st.session_state:
+            st.session_state[f"payroll_payments_editor_{version}"]["edited_rows"] = {}
 
 # Fetch all periods to populate selectors
 try:
@@ -214,9 +215,10 @@ except Exception as e:
     periods = []
 
 # Tabs
-tab_active, tab_pay_details, tab_history, tab_import = st.tabs([
+tab_active, tab_pay_details, tab_attendance, tab_history, tab_import = st.tabs([
     "📂 Planilla Activa / Editor", 
     "💸 Resumen y Pagos", 
+    "📸 Fotos de Asistencia", 
     "📜 Historial de Planillas", 
     "📥 Importar desde Excel"
 ])
@@ -989,8 +991,280 @@ with tab_pay_details:
     else:
         st.info("Seleccione una planilla en la pestaña anterior.")
 
+
+# --- TAB: ATTENDANCE PHOTOS ---
+with tab_attendance:
+    st.subheader("📸 Registro y Procesamiento de Asistencia (Fotos)")
+    st.markdown("Suba las fotos de las hojas de asistencia escritas a mano (cuaderno). La Inteligencia Artificial extraerá las horas trabajadas y le permitirá revisarlas antes de aplicarlas a la planilla.")
+    
+    if not selected_period_id:
+        st.info("Seleccione una planilla activa en la primera pestaña.")
+    else:
+        # Load period
+        period = supabase.table("payroll_periods").select("*").eq("id", selected_period_id).execute().data[0]
+        is_editable = (period["status"] == "borrador" and can_write)
+        
+        # --- Gemini API Key Section ---
+        # Look in secrets, env, or session_state
+        api_key_stored = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY") or st.session_state.get("gemini_api_key", "")
+        
+        col_key1, col_key2 = st.columns([2, 1])
+        with col_key1:
+            if not api_key_stored:
+                gemini_key_input = st.text_input(
+                    "🔑 Clave de API de Gemini (Requerido para procesar fotos):",
+                    type="password",
+                    help="Ingrese su API key de Google AI Studio para activar la digitalización automática.",
+                    value=st.session_state.get("gemini_api_key", "")
+                )
+                if gemini_key_input:
+                    st.session_state["gemini_api_key"] = gemini_key_input
+                    st.rerun()
+            else:
+                st.success("🟢 Clave API de Gemini configurada y lista.")
+                
+        with col_key2:
+            st.markdown(
+                """
+                <div style='font-size: 0.85em; color: #666; margin-top: 10px;'>
+                    ¿No tienes una clave? Consíguela gratis en <a href="https://aistudio.google.com/" target="_blank">Google AI Studio</a>.
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+        
+        # --- Upload Attendance Sheet Section ---
+        if is_editable:
+            with st.expander("➕ Subir Nueva Foto de Asistencia"):
+                day_names_es = ["Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo", "Lunes"]
+                selected_day = st.selectbox("Seleccione el día de la semana correspondiente a la foto:", options=day_names_es)
+                
+                uploaded_photo = st.file_uploader("Seleccione imagen de asistencia (PNG, JPG, JPEG):", type=["png", "jpg", "jpeg"], key="attendance_photo_uploader")
+                
+                if uploaded_photo and st.button("Guardar Foto de Asistencia", use_container_width=True):
+                    with st.spinner("Subiendo foto a Supabase Storage..."):
+                        # Get file extension
+                        ext = uploaded_photo.name.split(".")[-1]
+                        day_lower = selected_day.lower()
+                        remote_name = f"attendance/{selected_period_id}/{day_lower}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.{ext}"
+                        
+                        # Write to temp file
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
+                            tmp.write(uploaded_photo.read())
+                            tmp_path = tmp.name
+                            
+                        try:
+                            # Upload to 'vouchers' bucket under the attendance folder structure
+                            public_url = upload_document_to_supabase_storage(tmp_path, "vouchers", remote_name)
+                            st.success(f"¡Foto de asistencia para el {selected_day} guardada exitosamente!")
+                            os.remove(tmp_path)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al subir la imagen: {str(e)}")
+                            if os.path.exists(tmp_path):
+                                os.remove(tmp_path)
+        else:
+            if not can_write:
+                st.info("No tienes permisos de edición para subir fotos de asistencia.")
+            else:
+                st.info("Esta planilla no está en borrador (la edición está cerrada o pagada).")
+                
+        # --- List Uploaded Photos and AI Action ---
+        st.markdown("---")
+        st.markdown("### 🔍 Fotos de Asistencia Subidas para esta Semana")
+        
+        try:
+            # List files from 'vouchers' bucket at path 'attendance/{period_id}'
+            storage_path = f"attendance/{selected_period_id}"
+            files_list = supabase.storage.from_("vouchers").list(path=storage_path)
+            
+            # Filter out directories and only keep actual files
+            files = [f for f in files_list if isinstance(f, dict) and f.get("name") != ".emptyFolderPlaceholder"]
+            
+            if not files:
+                st.info("No se han subido fotos de asistencia para esta semana todavía.")
+            else:
+                # Group files by day for neat visualization
+                for idx, file in enumerate(files):
+                    filename = file["name"]
+                    # Extract day name from filename (e.g. "martes_20260729123000.jpg")
+                    day_part = filename.split("_")[0]
+                    day_disp = day_part.capitalize()
+                    
+                    # Formatting created date from metadata or filename timestamp
+                    try:
+                        timestamp_str = filename.split("_")[1].split(".")[0]
+                        upload_time = datetime.datetime.strptime(timestamp_str, "%Y%m%d%H%M%S").strftime("%d/%m/%Y %H:%M:%S")
+                    except Exception:
+                        upload_time = file.get("created_at", "Desconocido")
+                        
+                    # Get file URL
+                    file_url = supabase.storage.from_("vouchers").get_public_url(f"{storage_path}/{filename}")
+                    
+                    # Create container for each photo card
+                    with st.container():
+                        st.markdown(
+                            f"""
+                            <div style='background-color:#f9f9f9; padding: 12px; border-radius: 8px; border-left: 4px solid #4A90E2; margin-bottom: 10px;'>
+                                <b>Día:</b> {day_disp} | <b>Subido el:</b> {upload_time}
+                            </div>
+                            """, 
+                            unsafe_allow_html=True
+                        )
+                        
+                        col_img, col_actions = st.columns([1, 1])
+                        with col_img:
+                            st.image(file_url, caption=f"Asistencia de {day_disp}", use_container_width=True)
+                            
+                        with col_actions:
+                            st.markdown("#### Acciones")
+                            
+                            # Define unique keys for buttons
+                            btn_parse_key = f"parse_ai_{day_part}_{idx}"
+                            btn_delete_key = f"delete_ai_{day_part}_{idx}"
+                            
+                            # Parse with AI Action
+                            if not api_key_stored:
+                                st.warning("Configure la API Key de Gemini para activar el análisis con IA.")
+                            else:
+                                if st.button(f"🤖 Digitalizar Asistencia con IA ({day_disp})", key=btn_parse_key, use_container_width=True, type="primary"):
+                                    with st.spinner("Descargando imagen y procesando con Gemini..."):
+                                        try:
+                                            # Download image bytes
+                                            image_bytes = supabase.storage.from_("vouchers").download(f"{storage_path}/{filename}")
+                                            
+                                            # Determine mime type
+                                            ext = filename.split(".")[-1].lower()
+                                            mime_type = "image/png" if ext == "png" else "image/jpeg"
+                                            
+                                            # Get current active employees
+                                            entries = supabase.table("payroll_entries") \
+                                                .select("employee_name_snapshot, id") \
+                                                .eq("payroll_period_id", selected_period_id) \
+                                                .order("employee_name_snapshot") \
+                                                .execute().data
+                                            employee_names = [e["employee_name_snapshot"] for e in entries]
+                                            
+                                            # Run Gemini parsing
+                                            parsed_data = parse_attendance_image(
+                                                image_bytes=image_bytes,
+                                                mime_type=mime_type,
+                                                employee_names=employee_names,
+                                                api_key=api_key_stored
+                                            )
+                                            
+                                            st.session_state["attendance_parsed_results"] = parsed_data.get("attendance", [])
+                                            st.session_state["attendance_parsed_day"] = day_part
+                                            st.success("¡Digitalización completada! Revisa el resultado al final de la página.")
+                                            st.rerun()
+                                        except Exception as e:
+                                            st.error(f"Error durante el procesamiento con IA: {str(e)}")
+                                            
+                            # Delete Action
+                            if is_editable:
+                                if st.button(f"🗑️ Eliminar Foto ({day_disp})", key=btn_delete_key, use_container_width=True):
+                                    with st.spinner("Eliminando archivo..."):
+                                        try:
+                                            supabase.storage.from_("vouchers").remove([f"{storage_path}/{filename}"])
+                                            st.success("Foto eliminada correctamente.")
+                                            st.rerun()
+                                        except Exception as e:
+                                            st.error(f"Error al eliminar: {str(e)}")
+                            
+                            st.markdown("---")
+        except Exception as e:
+            st.error(f"Error al cargar fotos de asistencia: {str(e)}")
+            
+        # --- Interactive Preview and Save Section ---
+        if "attendance_parsed_results" in st.session_state and st.session_state["attendance_parsed_results"]:
+            parsed_results = st.session_state["attendance_parsed_results"]
+            parsed_day = st.session_state["attendance_parsed_day"]
+            
+            st.markdown("---")
+            st.markdown(f"### 🔍 Vista Previa de Asistencia Detectada: **{parsed_day.upper()}**")
+            st.info("Revise los datos extraídos por la IA y edite las horas o trabajadores directamente en la tabla si es necesario. Luego haga clic en 'Aplicar' para guardar.")
+            
+            # Get list of employee names in active payroll
+            entries = supabase.table("payroll_entries") \
+                .select("employee_name_snapshot, id") \
+                .eq("payroll_period_id", selected_period_id) \
+                .order("employee_name_snapshot") \
+                .execute().data
+            employee_names = [e["employee_name_snapshot"] for e in entries]
+            name_to_entry_id = {e["employee_name_snapshot"]: e["id"] for e in entries}
+            
+            # Prepare rows for st.data_editor
+            preview_rows = []
+            for item in parsed_results:
+                emp_name = item.get("employee_name", "")
+                # Clean or fuzzy match to best fit the official names list if not exact
+                matched_name = emp_name if emp_name in employee_names else (employee_names[0] if employee_names else "")
+                
+                preview_rows.append({
+                    "Trabajador": matched_name,
+                    "Hora Entrada": item.get("entry_time", "") or "",
+                    "Hora Salida": item.get("exit_time", "") or "",
+                    "Estado": "Presente" if item.get("status", "presente") == "presente" else "No Vino",
+                    "Horas a Registrar": float(item.get("calculated_hours", 0.0) or 0.0)
+                })
+                
+            df_preview = pd.DataFrame(preview_rows)
+            
+            # Show interactive editor
+            edited_preview_df = st.data_editor(
+                df_preview,
+                column_config={
+                    "Trabajador": st.column_config.SelectboxColumn("Trabajador Oficial", options=employee_names, required=True),
+                    "Hora Entrada": st.column_config.TextColumn("Hora Entrada"),
+                    "Hora Salida": st.column_config.TextColumn("Hora Salida"),
+                    "Estado": st.column_config.SelectboxColumn("Estado", options=["Presente", "No Vino"]),
+                    "Horas a Registrar": st.column_config.NumberColumn("Horas a Registrar (Real)", min_value=0.0, max_value=24.0, format="%.2f", step=0.1)
+                },
+                hide_index=True,
+                use_container_width=True,
+                num_rows="dynamic"
+            )
+            
+            col_save1, col_save2 = st.columns(2)
+            with col_save1:
+                if st.button("💾 Aplicar y Guardar Asistencia en Planilla", use_container_width=True, type="primary"):
+                    with st.spinner("Guardando horas en base de datos..."):
+                        try:
+                            # 1. Loop and update payroll_days
+                            for _, row in edited_preview_df.iterrows():
+                                name = row["Trabajador"]
+                                hours = float(row["Horas a Registrar"] or 0.0)
+                                entry_id = name_to_entry_id.get(name)
+                                
+                                if entry_id:
+                                    supabase.table("payroll_days") \
+                                        .update({"hours_worked": hours}) \
+                                        .eq("payroll_entry_id", entry_id) \
+                                        .eq("day_name", parsed_day.lower()) \
+                                        .execute()
+                                    # Recalculate this employee
+                                    calculate_employee_totals(entry_id)
+                                    
+                            # 2. Recalculate whole period
+                            calculate_payroll_totals(selected_period_id)
+                            
+                            st.success(f"¡Asistencia de {parsed_day.upper()} aplicada y guardada correctamente!")
+                            # Clear results from state
+                            del st.session_state["attendance_parsed_results"]
+                            del st.session_state["attendance_parsed_day"]
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al guardar asistencia: {str(e)}")
+                            
+            with col_save2:
+                if st.button("❌ Descartar Resultados", use_container_width=True):
+                    del st.session_state["attendance_parsed_results"]
+                    del st.session_state["attendance_parsed_day"]
+                    st.rerun()
+
 # --- TAB 3: HISTORICAL LIST ---
 with tab_history:
+
     st.subheader("📜 Historial de Planillas")
     if periods:
         hist_data = []
