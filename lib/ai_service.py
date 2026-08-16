@@ -4,11 +4,11 @@ import requests
 
 def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: list, api_key: str) -> dict:
     """
-    Sends the handwritten attendance sheet image to the Gemini API (gemini-2.5-flash)
+    Sends the handwritten attendance sheet image to the Gemini API (gemini-3.5-flash)
     using HTTP POST requests to perform OCR and structure the results.
     """
     api_key = api_key.strip()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={api_key}"
     
     # Base64 encode the image
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -83,7 +83,7 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
                     models_data = list_resp.json()
                     available_models = [m["name"].split("/")[-1] for m in models_data.get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])]
                     raise ValueError(
-                        f"Error HTTP 404: El modelo 'gemini-1.5-flash' no se encontró. "
+                        f"Error HTTP 404: El modelo solicitado no se encontró o no está disponible. "
                         f"Los modelos disponibles en tu cuenta para generación de contenido son: {available_models}. "
                         f"Detalle: {response.text}"
                     )
