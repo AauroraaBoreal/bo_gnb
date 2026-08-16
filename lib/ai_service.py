@@ -4,11 +4,11 @@ import requests
 
 def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: list, api_key: str) -> dict:
     """
-    Sends the handwritten attendance sheet image to the Gemini API (gemini-1.5-flash)
+    Sends the handwritten attendance sheet image to the Gemini API (gemini-2.5-flash)
     using HTTP POST requests to perform OCR and structure the results.
     """
     api_key = api_key.strip()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     
     # Base64 encode the image
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
