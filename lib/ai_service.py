@@ -75,6 +75,22 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
     try:
         response.raise_for_status()
     except requests.exceptions.HTTPError as http_err:
+        if response.status_code == 404:
+            try:
+                list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+                list_resp = requests.get(list_url)
+                if list_resp.status_code == 200:
+                    models_data = list_resp.json()
+                    available_models = [m["name"].split("/")[-1] for m in models_data.get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])]
+                    raise ValueError(
+                        f"Error HTTP 404: El modelo 'gemini-1.5-flash' no se encontró. "
+                        f"Los modelos disponibles en tu cuenta para generación de contenido son: {available_models}. "
+                        f"Detalle: {response.text}"
+                    )
+            except ValueError:
+                raise
+            except Exception:
+                pass
         raise ValueError(f"Error HTTP {response.status_code}: {response.text}")
     
     res_json = response.json()
