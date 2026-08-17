@@ -65,7 +65,28 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
             }
         ],
         "generationConfig": {
-            "responseMimeType": "application/json"
+            "responseMimeType": "application/json",
+            "maxOutputTokens": 4096,
+            "responseSchema": {
+                "type": "OBJECT",
+                "properties": {
+                    "attendance": {
+                        "type": "ARRAY",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "employee_name": {"type": "STRING"},
+                                "status": {"type": "STRING", "enum": ["presente", "no_vino"]},
+                                "entry_time": {"type": "STRING"},
+                                "exit_time": {"type": "STRING"},
+                                "calculated_hours": {"type": "NUMBER"}
+                            },
+                            "required": ["employee_name", "status", "calculated_hours"]
+                        }
+                    }
+                },
+                "required": ["attendance"]
+            }
         }
     }
     
