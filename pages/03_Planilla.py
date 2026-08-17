@@ -1238,11 +1238,31 @@ with tab_attendance:
             employee_names = [e["employee_name_snapshot"] for e in entries]
             name_to_entry_id = {e["employee_name_snapshot"]: e["id"] for e in entries}
             
-            # Prepare rows for st.data_editor
+            # Prepare rows for st.data_editor with unique mapping (Requirement 4)
+            import difflib
+            remaining_names = list(employee_names)
             preview_rows = []
             for item in parsed_results:
                 emp_name = item.get("employee_name", "")
-                matched_name = emp_name if emp_name in employee_names else (employee_names[0] if employee_names else "")
+                
+                matched_name = None
+                # 1. Exact match in remaining
+                if emp_name in remaining_names:
+                    matched_name = emp_name
+                else:
+                    # 2. Fuzzy match in remaining
+                    matches = difflib.get_close_matches(emp_name, remaining_names, n=1, cutoff=0.5)
+                    if matches:
+                        matched_name = matches[0]
+                
+                # Update remaining and fallback
+                if matched_name:
+                    remaining_names.remove(matched_name)
+                else:
+                    if remaining_names:
+                        matched_name = remaining_names.pop(0)
+                    else:
+                        matched_name = employee_names[0] if employee_names else ""
                 
                 preview_rows.append({
                     "Trabajador": matched_name,
@@ -1272,33 +1292,38 @@ with tab_attendance:
             col_save1, col_save2 = st.columns(2)
             with col_save1:
                 if st.button("💾 Aplicar y Guardar Asistencia en Planilla", use_container_width=True, type="primary"):
-                    with st.spinner("Guardando horas en base de datos..."):
-                        try:
-                            # 1. Loop and update payroll_days
-                            for _, row in edited_preview_df.iterrows():
-                                name = row["Trabajador"]
-                                hours = float(row["Horas a Registrar"] or 0.0)
-                                entry_id = name_to_entry_id.get(name)
-                                
-                                if entry_id:
-                                    supabase.table("payroll_days") \
-                                        .update({"hours_worked": hours}) \
-                                        .eq("payroll_entry_id", entry_id) \
-                                        .eq("day_name", parsed_day.lower()) \
-                                        .execute()
-                                    # Recalculate this employee
-                                    calculate_employee_totals(entry_id)
+                    # Validate that each worker is selected only once (Requirement 4)
+                    selected_workers = [row["Trabajador"] for _, row in edited_preview_df.iterrows() if row["Trabajador"]]
+                    if len(selected_workers) != len(set(selected_workers)):
+                        st.error("⚠️ No se puede guardar: Has asignado el mismo trabajador a más de una fila. Cada fila debe tener un trabajador único.")
+                    else:
+                        with st.spinner("Guardando horas en base de datos..."):
+                            try:
+                                # 1. Loop and update payroll_days
+                                for _, row in edited_preview_df.iterrows():
+                                    name = row["Trabajador"]
+                                    hours = float(row["Horas a Registrar"] or 0.0)
+                                    entry_id = name_to_entry_id.get(name)
                                     
-                            # 2. Recalculate whole period
-                            calculate_payroll_totals(photo_period_id)
-                            
-                            st.success(f"¡Asistencia de {parsed_day.upper()} aplicada y guardada correctamente!")
-                            # Clear results from state
-                            del st.session_state["attendance_parsed_results"]
-                            del st.session_state["attendance_parsed_day"]
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error al guardar asistencia: {str(e)}")
+                                    if entry_id:
+                                        supabase.table("payroll_days") \
+                                            .update({"hours_worked": hours}) \
+                                            .eq("payroll_entry_id", entry_id) \
+                                            .eq("day_name", parsed_day.lower()) \
+                                            .execute()
+                                        # Recalculate this employee
+                                        calculate_employee_totals(entry_id)
+                                        
+                                # 2. Recalculate whole period
+                                calculate_payroll_totals(photo_period_id)
+                                
+                                st.success(f"¡Asistencia de {parsed_day.upper()} aplicada y guardada correctamente!")
+                                # Clear results from state
+                                del st.session_state["attendance_parsed_results"]
+                                del st.session_state["attendance_parsed_day"]
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error al guardar asistencia: {str(e)}")
                             
             with col_save2:
                 if st.button("❌ Descartar Resultados", use_container_width=True):
