@@ -52,6 +52,15 @@ st.title("💵 Planilla Semanal de Pagos")
 st.markdown("Módulo principal para preparar el pago de operarios y empleados.")
 st.markdown("---")
 
+# Show confirmation of newly created payroll if present in session state (Requirement 1)
+if "just_created_payroll" in st.session_state:
+    info = st.session_state["just_created_payroll"]
+    st.success(f"🎉 **¡Planilla Creada Exitosamente!**")
+    st.info(f"📅 **Planilla:** {info['title']}\n\n👷 **Trabajadores incluidos ({len(info['workers'])}):** {', '.join(info['workers'])}")
+    # Remove from state so it doesn't show again on next refresh
+    del st.session_state["just_created_payroll"]
+    st.markdown("---")
+
 user = st.session_state.user
 can_write = check_permission(["admin", "jefe"])
 supabase = get_supabase_client()
@@ -318,7 +327,22 @@ with tab_active:
                 else:
                     selected_emps = []
                     st.warning("No se encontraron trabajadores en el sistema.")
-                
+                if selected_emps:
+                    selected_active_names = []
+                    selected_inactive_names = []
+                    for emp in all_emps:
+                        if emp["id"] in selected_emps:
+                            if emp["active"]:
+                                selected_active_names.append(emp["full_name"])
+                            else:
+                                selected_inactive_names.append(emp["full_name"])
+                    
+                    st.markdown("##### 🔍 Resumen de trabajadores a incluir:")
+                    if selected_active_names:
+                        st.success(f"🟢 **Activos ({len(selected_active_names)}):** {', '.join(selected_active_names)}")
+                    if selected_inactive_names:
+                        st.warning(f"⚠️ **Inactivos ({len(selected_inactive_names)}):** {', '.join(selected_inactive_names)}")
+                        
                 if st.button("Crear Planilla", use_container_width=True):
                     if payment_date.weekday() != 2:
                         st.warning("Advertencia: El día de pago sugerido debe ser un miércoles.")
@@ -328,7 +352,11 @@ with tab_active:
                         try:
                             with st.spinner("Inicializando planilla y cargando trabajadores seleccionados..."):
                                 create_payroll_period(payment_date, user["id"], employee_ids=selected_emps, is_test=is_test_period)
-                            st.success("Planilla semanal creada.")
+                            # Save creation details to show post-refresh (Requirement 1)
+                            st.session_state["just_created_payroll"] = {
+                                "title": f"Planilla Semanal: {start_p.strftime('%d/%m/%Y')} al {end_p.strftime('%d/%m/%Y')}",
+                                "workers": [emp_options[eid].replace("🟢", "").replace("🔴 (Inactivo)", "").strip() for eid in selected_emps]
+                            }
                             st.rerun()
                         except Exception as e:
                             st.error(str(e))
@@ -1024,15 +1052,29 @@ with tab_attendance:
     st.subheader("📸 Registro y Procesamiento de Asistencia (Fotos)")
     st.markdown("Suba las fotos de las hojas de asistencia escritas a mano (cuaderno). La Inteligencia Artificial extraerá las horas trabajadas y le permitirá revisarlas antes de aplicarlas a la planilla.")
     
-    if not selected_period_id:
-        st.info("Seleccione una planilla activa en la primera pestaña.")
+    if not periods:
+        st.info("No hay planillas registradas. Cree una en la pestaña 'Planilla Activa' primero.")
     else:
+        # Period Selector for Attendance Photos Tab (Requirement 2)
+        period_options = {p["id"]: f"{p['title']} [{p['status'].upper()}]" for p in periods}
+        photo_period_id = st.session_state.get("photo_period_id", selected_period_id)
+        if photo_period_id not in period_options:
+            photo_period_id = list(period_options.keys())[0] if period_options else None
+            
+        photo_period_id = st.selectbox(
+            "Seleccionar Planilla para gestionar fotos y asistencia:",
+            options=list(period_options.keys()),
+            format_func=lambda x: period_options[x],
+            index=list(period_options.keys()).index(photo_period_id) if photo_period_id in period_options else 0,
+            key="attendance_period_selectbox"
+        )
+        st.session_state["photo_period_id"] = photo_period_id
+        
         # Load period
-        period = supabase.table("payroll_periods").select("*").eq("id", selected_period_id).execute().data[0]
+        period = [p for p in periods if p["id"] == photo_period_id][0]
         is_editable = (period["status"] == "borrador" and can_write)
         
         # Display period name and type
-        st.markdown(f"### 📂 Gestionando Fotos para: **{period['title']}**")
         is_test_val = period.get("is_test", False)
         if is_test_val:
             st.warning("⚠️ **ESTA PLANILLA ESTÁ MARCADA COMO PRUEBA** (Los cambios en asistencia no afectarán a los reportes de producción).")
@@ -1085,18 +1127,16 @@ with tab_attendance:
             
         selected_day = st.session_state["selected_attendance_day"]
         
-        # Load photos list from storage to know which days have uploads
-        storage_path = f"attendance/{selected_period_id}"
+        # Check which days have work entries (hours_worked > 0) instead of files (Requirement 3)
+        days_with_hours = set()
         try:
-            files_list = supabase.storage.from_("vouchers").list(path=storage_path)
-            files = [f for f in files_list if isinstance(f, dict) and f.get("name") != ".emptyFolderPlaceholder"]
+            p_entries = supabase.table("payroll_entries").select("id").eq("payroll_period_id", photo_period_id).execute().data
+            entry_ids = [e["id"] for e in p_entries]
+            if entry_ids:
+                p_days = supabase.table("payroll_days").select("day_name, hours_worked").in_("payroll_entry_id", entry_ids).execute().data
+                days_with_hours = {d["day_name"] for d in p_days if d["hours_worked"] > 0}
         except Exception:
-            files = []
-            
-        uploaded_days_map = {} # day_lower -> file dict
-        for f in files:
-            day_key = f["name"].split("_")[0]
-            uploaded_days_map[day_key] = f
+            pass
             
         st.markdown("#### 📅 Calendario Semanal de Asistencia")
         st.caption("Seleccione un día para gestionar su foto de asistencia:")
@@ -1106,8 +1146,8 @@ with tab_attendance:
             day_name_lower = day_names_es[i].lower()
             day_date = period_start + datetime.timedelta(days=i)
             
-            # Indicator in label if photo is uploaded
-            indicator = "📷" if day_name_lower in uploaded_days_map else "⚪"
+            # Indicator in label is ✅ if attendance has been processed/has hours, else ⚪ (Requirement 3)
+            indicator = "✅" if day_name_lower in days_with_hours else "⚪"
             label = f"**{day_names_short[i]} {day_date.day}**\n\n({indicator})"
             
             is_selected = (selected_day == day_name_lower)
@@ -1124,110 +1164,62 @@ with tab_attendance:
         day_display = selected_day.capitalize()
         st.markdown(f"### 📂 Asistencia del día: **{day_display}**")
         
-        if selected_day in uploaded_days_map:
-            # A photo is already uploaded for this day
-            file = uploaded_days_map[selected_day]
-            filename = file["name"]
+        # In-memory photo processing without saving it to Supabase Storage (Requirement 3)
+        if is_editable:
+            st.info(f"Para digitalizar la asistencia del **{day_display}** usando Inteligencia Artificial, suba la foto a continuación (esta no se guardará en el servidor, solo se procesará temporalmente):")
             
-            try:
-                timestamp_str = filename.split("_")[1].split(".")[0]
-                upload_time = datetime.datetime.strptime(timestamp_str, "%Y%m%d%H%M%S").strftime("%d/%m/%Y %H:%M:%S")
-            except Exception:
-                upload_time = file.get("created_at", "Desconocido")
-                
-            file_url = supabase.storage.from_("vouchers").get_public_url(f"{storage_path}/{filename}")
+            uploaded_photo = st.file_uploader(
+                f"Seleccione la foto para el {day_display} (PNG, JPG, JPEG):",
+                type=["png", "jpg", "jpeg"],
+                key=f"uploader_{selected_day}"
+            )
             
-            col_img, col_actions = st.columns([1, 1])
-            with col_img:
-                st.image(file_url, caption=f"Foto de Asistencia - {day_display}", use_container_width=True)
-                
-            with col_actions:
-                st.markdown("#### Acciones Disponibles")
-                st.info(f"Subido el: {upload_time}")
-                
-                # Parse with AI Button
-                if not api_key_stored:
-                    st.warning("⚠️ Configure la API Key de Gemini para activar el análisis con IA.")
-                else:
-                    if st.button("🤖 Digitalizar Asistencia con IA", use_container_width=True, type="primary"):
-                        with st.spinner("Descargando imagen y procesando con Gemini..."):
-                            try:
-                                image_bytes = supabase.storage.from_("vouchers").download(f"{storage_path}/{filename}")
-                                ext = filename.split(".")[-1].lower()
-                                mime_type = "image/png" if ext == "png" else "image/jpeg"
-                                
-                                # Get active employees
-                                entries = supabase.table("payroll_entries") \
-                                    .select("employee_name_snapshot, id") \
-                                    .eq("payroll_period_id", selected_period_id) \
-                                    .order("employee_name_snapshot") \
-                                    .execute().data
-                                employee_names = [e["employee_name_snapshot"] for e in entries]
-                                
-                                # Run Gemini parser
-                                parsed_data = parse_attendance_image(
-                                    image_bytes=image_bytes,
-                                    mime_type=mime_type,
-                                    employee_names=employee_names,
-                                    api_key=api_key_stored
-                                )
-                                
-                                st.session_state["attendance_parsed_results"] = parsed_data.get("attendance", [])
-                                st.session_state["attendance_parsed_day"] = selected_day
-                                st.success("¡Digitalización completada! Revisa los resultados abajo.")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Error durante el procesamiento con IA: {str(e)}")
-                                
-                # Delete Button
-                if is_editable:
-                    if st.button("🗑️ Eliminar Foto de Asistencia", use_container_width=True, type="secondary"):
-                        with st.spinner("Eliminando archivo..."):
-                            try:
-                                supabase.storage.from_("vouchers").remove([f"{storage_path}/{filename}"])
-                                st.success("Foto eliminada correctamente.")
-                                if "attendance_parsed_day" in st.session_state and st.session_state["attendance_parsed_day"] == selected_day:
-                                    del st.session_state["attendance_parsed_results"]
-                                    del st.session_state["attendance_parsed_day"]
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Error al eliminar: {str(e)}")
+            if uploaded_photo:
+                col_img, col_actions = st.columns([1, 1])
+                with col_img:
+                    st.image(uploaded_photo, caption=f"Foto cargada - {day_display}", use_container_width=True)
+                    
+                with col_actions:
+                    st.markdown("#### Acciones Disponibles")
+                    st.info("La foto está cargada en memoria. Haga clic abajo para procesar con IA.")
+                    
+                    if not api_key_stored:
+                        st.warning("⚠️ Configure la API Key de Gemini para activar el análisis con IA.")
+                    else:
+                        if st.button("🤖 Digitalizar Asistencia con IA", use_container_width=True, type="primary"):
+                            with st.spinner("Procesando foto directamente con Gemini..."):
+                                try:
+                                    image_bytes = uploaded_photo.read()
+                                    compressed_bytes = compress_image(image_bytes, max_dim=1600)
+                                    
+                                    ext = uploaded_photo.name.split(".")[-1].lower()
+                                    mime_type = "image/png" if ext == "png" else "image/jpeg"
+                                    
+                                    # Get active employees snapshot in this payroll
+                                    entries = supabase.table("payroll_entries") \
+                                        .select("employee_name_snapshot, id") \
+                                        .eq("payroll_period_id", photo_period_id) \
+                                        .order("employee_name_snapshot") \
+                                        .execute().data
+                                    employee_names = [e["employee_name_snapshot"] for e in entries]
+                                    
+                                    # Run Gemini parser
+                                    parsed_data = parse_attendance_image(
+                                        image_bytes=compressed_bytes,
+                                        mime_type=mime_type,
+                                        employee_names=employee_names,
+                                        api_key=api_key_stored
+                                    )
+                                    
+                                    st.session_state["attendance_parsed_results"] = parsed_data.get("attendance", [])
+                                    st.session_state["attendance_parsed_day"] = selected_day
+                                    st.success("¡Digitalización completada! Revisa los resultados abajo.")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error durante el procesamiento con IA: {str(e)}")
         else:
-            # No photo uploaded for this day
-            if is_editable:
-                st.info(f"No hay fotos subidas para el **{day_display}**. Suba una foto de asistencia a continuación:")
-                
-                uploaded_photo = st.file_uploader(
-                    f"Seleccione la foto para el {day_display} (PNG, JPG, JPEG):",
-                    type=["png", "jpg", "jpeg"],
-                    key=f"uploader_{selected_day}"
-                )
-                
-                if uploaded_photo and st.button(f"Guardar Foto para el {day_display}", use_container_width=True):
-                    with st.spinner("Procesando y subiendo foto a Supabase..."):
-                        # Read and compress image bytes to JPEG for optimized transfer speeds
-                        raw_bytes = uploaded_photo.read()
-                        compressed_bytes = compress_image(raw_bytes, max_dim=1600)
-                        
-                        # Save with standard JPEG extension since compress_image outputs JPEG
-                        remote_name = f"attendance/{selected_period_id}/{selected_day}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
-                        
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                            tmp.write(compressed_bytes)
-                            tmp_path = tmp.name
-                            
-                        try:
-                            upload_document_to_supabase_storage(tmp_path, "vouchers", remote_name)
-                            st.success(f"¡Foto de asistencia para el {day_display} guardada!")
-                            os.remove(tmp_path)
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error al subir: {str(e)}")
-                            if os.path.exists(tmp_path):
-                                os.remove(tmp_path)
-            else:
-                st.info(f"No hay fotos subidas para el **{day_display}** y la edición de esta planilla está cerrada.")
-                
+            st.info(f"La edición de la planilla para el **{day_display}** está cerrada.")
+            
         # --- Interactive Preview and Save Section ---
         if "attendance_parsed_results" in st.session_state and st.session_state.get("attendance_parsed_day") == selected_day:
             parsed_results = st.session_state["attendance_parsed_results"]
@@ -1237,10 +1229,10 @@ with tab_attendance:
             st.markdown(f"### 🔍 Vista Previa de Asistencia Detectada: **{parsed_day.upper()}**")
             st.info("Revise los datos extraídos por la IA y edite las horas o trabajadores directamente en la tabla si es necesario. Luego haga clic en 'Aplicar' para guardar.")
             
-            # Get list of employee names in active payroll
+            # Get list of employee names in selected payroll
             entries = supabase.table("payroll_entries") \
                 .select("employee_name_snapshot, id") \
-                .eq("payroll_period_id", selected_period_id) \
+                .eq("payroll_period_id", photo_period_id) \
                 .order("employee_name_snapshot") \
                 .execute().data
             employee_names = [e["employee_name_snapshot"] for e in entries]
@@ -1250,7 +1242,6 @@ with tab_attendance:
             preview_rows = []
             for item in parsed_results:
                 emp_name = item.get("employee_name", "")
-                # Clean or fuzzy match to best fit the official names list if not exact
                 matched_name = emp_name if emp_name in employee_names else (employee_names[0] if employee_names else "")
                 
                 preview_rows.append({
@@ -1299,7 +1290,7 @@ with tab_attendance:
                                     calculate_employee_totals(entry_id)
                                     
                             # 2. Recalculate whole period
-                            calculate_payroll_totals(selected_period_id)
+                            calculate_payroll_totals(photo_period_id)
                             
                             st.success(f"¡Asistencia de {parsed_day.upper()} aplicada y guardada correctamente!")
                             # Clear results from state
