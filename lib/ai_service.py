@@ -66,7 +66,10 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
         ],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "maxOutputTokens": 4096,
+            "maxOutputTokens": 8192,
+            "thinkingConfig": {
+                "thinkingBudget": 0
+            },
             "responseSchema": {
                 "type": "OBJECT",
                 "properties": {
