@@ -1238,31 +1238,26 @@ with tab_attendance:
             employee_names = [e["employee_name_snapshot"] for e in entries]
             name_to_entry_id = {e["employee_name_snapshot"]: e["id"] for e in entries}
             
-            # Prepare rows for st.data_editor with unique mapping (Requirement 4)
+            # Prepare rows for st.data_editor with unique mapping (Requirement 4 & 5)
             import difflib
             remaining_names = list(employee_names)
             preview_rows = []
             for item in parsed_results:
                 emp_name = item.get("employee_name", "")
                 
-                matched_name = None
+                matched_name = ""
                 # 1. Exact match in remaining
                 if emp_name in remaining_names:
                     matched_name = emp_name
                 else:
-                    # 2. Fuzzy match in remaining
-                    matches = difflib.get_close_matches(emp_name, remaining_names, n=1, cutoff=0.5)
+                    # 2. Fuzzy match in remaining (cutoff=0.6 to prevent wild wrong matches)
+                    matches = difflib.get_close_matches(emp_name, remaining_names, n=1, cutoff=0.6)
                     if matches:
                         matched_name = matches[0]
                 
                 # Update remaining and fallback
                 if matched_name:
                     remaining_names.remove(matched_name)
-                else:
-                    if remaining_names:
-                        matched_name = remaining_names.pop(0)
-                    else:
-                        matched_name = employee_names[0] if employee_names else ""
                 
                 preview_rows.append({
                     "Trabajador": matched_name,
@@ -1278,7 +1273,7 @@ with tab_attendance:
             edited_preview_df = st.data_editor(
                 df_preview,
                 column_config={
-                    "Trabajador": st.column_config.SelectboxColumn("Trabajador Oficial", options=employee_names, required=True),
+                    "Trabajador": st.column_config.SelectboxColumn("Trabajador Oficial", options=[""] + employee_names, required=False),
                     "Hora Entrada": st.column_config.TextColumn("Hora Entrada"),
                     "Hora Salida": st.column_config.TextColumn("Hora Salida"),
                     "Estado": st.column_config.SelectboxColumn("Estado", options=["Presente", "No Vino"]),
@@ -1292,9 +1287,14 @@ with tab_attendance:
             col_save1, col_save2 = st.columns(2)
             with col_save1:
                 if st.button("💾 Aplicar y Guardar Asistencia en Planilla", use_container_width=True, type="primary"):
-                    # Validate that each worker is selected only once (Requirement 4)
-                    selected_workers = [row["Trabajador"] for _, row in edited_preview_df.iterrows() if row["Trabajador"]]
-                    if len(selected_workers) != len(set(selected_workers)):
+                    # Validate that each worker is selected and only once (Requirement 4 & 5)
+                    selected_workers = [row["Trabajador"] for _, row in edited_preview_df.iterrows()]
+                    has_empty = any(w == "" or w is None for w in selected_workers)
+                    non_empty_workers = [w for w in selected_workers if w]
+                    
+                    if has_empty:
+                        st.error("⚠️ No se puede guardar: Hay filas sin trabajador seleccionado. Por favor seleccione un trabajador de la lista desplegable para cada fila.")
+                    elif len(non_empty_workers) != len(set(non_empty_workers)):
                         st.error("⚠️ No se puede guardar: Has asignado el mismo trabajador a más de una fila. Cada fila debe tener un trabajador único.")
                     else:
                         with st.spinner("Guardando horas en base de datos..."):
