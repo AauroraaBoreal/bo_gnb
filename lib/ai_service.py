@@ -26,13 +26,16 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
          * Existe una tolerancia de hasta las 8:15 AM. Si el trabajador llega entre las 8:00 AM y las 8:15 AM (inclusive), se considera como si hubiera ingresado a las 8:00 AM (sin descuento).
          * Si llega después de las 8:15 AM (ejemplo: 8:16 AM en adelante), se le descuenta minuto a minuto desde las 8:00 AM (es decir, la hora de entrada efectiva para el cálculo es su hora real de llegada, por ejemplo, 8:16 AM).
          * Si llega antes de las 8:00 AM (ej. 7:35 AM), se cuenta desde las 8:00 AM (a menos que trabaje sobretiempo, pero por defecto asume inicio a las 8:00 AM).
+       - Regla de Jornada Nocturna (Turno de Noche):
+         * Si el turno es nocturno (por ejemplo, entrada a las 11:00 PM y salida a las 7:00 AM del día siguiente), esto corresponde a una jornada de noche y equivale a exactamente 8.0 horas trabajadas. Asegúrate de calcularlo como 8.0 horas (no 16.0 ni otros valores erróneos de cálculo de día cruzado).
        - La hora de salida estándar es a las 5:00 PM (17:00). Si sale después (ej. 6:00 PM), esas son horas extras que se suman (ej. salida 6:00 PM = +1 hora extra, total = 9 horas).
-       - Resta siempre 1 hora por refrigerio/almuerzo si el rango total transcurrido supera las 5 horas.
+       - Resta siempre 1 hora por refrigerio/almuerzo si el rango total transcurrido supera las 5 horas (esta regla NO aplica a la jornada nocturna de 11:00 PM a 7:00 AM, la cual se registra directamente como 8.0 horas netas).
        - Ejemplos prácticos:
          * Entrada 7:35 AM, Salida 6:00 PM -> Como llegó antes de las 8:00 AM, su inicio efectivo es 8:00 AM. Salida: 6:00 PM. Total transcurrido = 10 horas. Menos 1h de refrigerio = 9.0 horas reales de trabajo.
          * Entrada 8:12 AM, Salida 5:00 PM -> Como llegó dentro de la tolerancia (<= 8:15 AM), su inicio efectivo es 8:00 AM. Salida: 5:00 PM. Total transcurrido = 9 horas. Menos 1h de refrigerio = 8.0 horas reales de trabajo.
          * Entrada 8:16 AM, Salida 5:00 PM -> Como llegó después de la tolerancia (> 8:15 AM), su inicio efectivo es 8:16 AM (8.27 horas decimales). Salida: 5:00 PM (17.00). Transcurrido = 8.73 horas. Menos 1h de refrigerio = 7.73 horas reales de trabajo.
          * Entrada 8:30 AM, Salida 5:00 PM -> Como llegó después de la tolerancia (> 8:15 AM), su inicio efectivo es 8:30 AM (8.50 horas decimales). Salida: 5:00 PM (17.00). Transcurrido = 8.50 horas. Menos 1h de refrigerio = 7.50 horas reales de trabajo.
+         * Entrada 11:00 PM, Salida 7:00 AM -> Turno de noche. Corresponde a exactamente 8.0 horas reales de trabajo.
     2. Si dice "NO VINO" o similar, el estado es "no_vino" y las horas son 0.0.
     
     Debes mapear los nombres manuscritos en la foto a la siguiente lista oficial de trabajadores registrados en la base de datos (haz un emparejamiento inteligente aproximado/fuzzy matching si el nombre en el papel está abreviado, mal escrito o incompleto):
