@@ -72,6 +72,7 @@ def create_payroll_period(payment_date: datetime.date, user_id: str = None, empl
             "hourly_rate_snapshot": worker["hourly_rate"],
             "payment_method_snapshot": worker["payment_method"],
             "account_snapshot": worker["yape_phone"] if worker["payment_method"] == "yape" else worker["account_number"],
+            "is_night_shift_snapshot": worker.get("is_night_shift", False),
             "gross_total": 0.00,
             "adjustment_total": 0.00,
             "net_total": 0.00,
@@ -84,7 +85,8 @@ def create_payroll_period(payment_date: datetime.date, user_id: str = None, empl
         # Create 7 daily work records
         for i, name in enumerate(day_names):
             w_date = start_date + datetime.timedelta(days=i)
-            mult = sunday_mult if name == "domingo" else 1.00
+            is_ns = worker.get("is_night_shift", False)
+            mult = sunday_mult if (name == "domingo" and not is_ns) else 1.00
             
             # For fixed workers, daily pay is always daily_rate / 8, so multiplier is 1x and base amount is daily_rate
             # We will calculate daily calculated_amount when filling hours. Initially 0 hours
@@ -303,6 +305,7 @@ def add_employee_to_payroll(period_id: str, employee_id: str):
         "hourly_rate_snapshot": worker["hourly_rate"],
         "payment_method_snapshot": worker["payment_method"],
         "account_snapshot": worker["yape_phone"] if worker["payment_method"] == "yape" else worker["account_number"],
+        "is_night_shift_snapshot": worker.get("is_night_shift", False),
         "gross_total": 0.00,
         "adjustment_total": 0.00,
         "net_total": 0.00,
@@ -316,7 +319,8 @@ def add_employee_to_payroll(period_id: str, employee_id: str):
     day_names = ["martes", "miercoles", "jueves", "viernes", "sabado", "domingo", "lunes"]
     for i, name in enumerate(day_names):
         w_date = start_date + datetime.timedelta(days=i)
-        mult = sunday_mult if name == "domingo" else 1.00
+        is_ns = worker.get("is_night_shift", False)
+        mult = sunday_mult if (name == "domingo" and not is_ns) else 1.00
         
         day_data = {
             "payroll_entry_id": new_entry["id"],

@@ -159,6 +159,7 @@ with tab_list:
                         st.markdown(f"**Correo:** `{emp_data['email'] or 'No registrado'}`")
                         st.markdown(f"**Fecha Ingreso:** `{emp_data['start_date'] or 'No registrada'}`")
                         st.markdown(f"**Fecha Egreso:** `{emp_data['end_date'] or '-'}`")
+                        st.markdown(f"**Turno Noche:** `{'Sí 🌙' if emp_data.get('is_night_shift', False) else 'No'}`")
                         
                     with col_info2:
                         st.markdown("#### 💼 Información Laboral y Pagos")
@@ -207,6 +208,7 @@ with tab_list:
                                 key="edit_type"
                             )
                             edit_position = st.text_input("Cargo o Especialidad *", value=emp_data["position"], key="edit_pos")
+                            edit_is_night_shift = st.checkbox("Turno Noche 🌙 (No pagar doble domingo)", value=emp_data.get("is_night_shift", False), key="edit_night_shift")
                             
                         with col_ed2:
                             edit_daily_rate = st.number_input(
@@ -280,6 +282,7 @@ with tab_list:
                                     "position": edit_position,
                                     "daily_rate": edit_daily_rate,
                                     "hourly_rate": edit_daily_rate / 8,
+                                    "is_night_shift": edit_is_night_shift,
                                     "payment_method": edit_payment_method,
                                     "bank_name": edit_bank_name if edit_bank_name else None,
                                     "account_number": edit_account_number if edit_account_number else None,
@@ -406,6 +409,7 @@ with tab_new:
                 new_dni = st.text_input("DNI (Opcional)", max_chars=8, key="new_dni")
                 new_phone = st.text_input("Celular", key="new_phone")
                 new_email = st.text_input("Correo Electrónico", key="new_email")
+                new_is_night_shift = st.checkbox("Turno Noche 🌙 (No pagar doble domingo)", value=False, key="new_night_shift")
                 
             with col_new2:
                 st.markdown("##### 💼 Información Laboral")
@@ -480,6 +484,7 @@ with tab_new:
                         "position": new_position,
                         "daily_rate": new_daily_rate,
                         "hourly_rate": new_daily_rate / 8,
+                        "is_night_shift": new_is_night_shift,
                         "payment_method": new_payment_method,
                         "bank_name": new_bank_name if new_bank_name else None,
                         "account_number": new_account_number if new_account_number else None,
