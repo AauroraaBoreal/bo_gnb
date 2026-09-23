@@ -168,7 +168,7 @@ def require_auth():
 def auth_gate():
     """
     Secure gateway to call at the top of Streamlit pages.
-    Displays a modern login/register interface if unauthenticated and stops execution.
+    Displays a modern login interface if unauthenticated and stops execution.
     """
     init_auth_session()
     if not st.session_state.authenticated:
@@ -177,42 +177,20 @@ def auth_gate():
         
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            tab1, tab2 = st.tabs(["Iniciar Sesión", "Registrarse"])
-            
-            with tab1:
-                with st.form("login_form", clear_on_submit=False):
-                    email = st.text_input("Correo electrónico", placeholder="admin@gnb.com", key="login_email")
-                    password = st.text_input("Contraseña", type="password", placeholder="******", key="login_password")
-                    submit = st.form_submit_button("Entrar", use_container_width=True)
-                    
-                    if submit:
-                        if not email or not password:
-                            st.error("Por favor complete todos los campos.")
-                        else:
-                            with st.spinner("Autenticando..."):
-                                if login(email, password):
-                                    st.success("¡Acceso concedido!")
-                                    st.rerun()
-                                    
-            with tab2:
-                with st.form("register_form", clear_on_submit=False):
-                    reg_email = st.text_input("Correo electrónico", placeholder="correo@ejemplo.com", key="reg_email")
-                    reg_name = st.text_input("Nombre completo", placeholder="Juan Pérez", key="reg_name")
-                    reg_password = st.text_input("Contraseña (mínimo 6 caracteres)", type="password", placeholder="******", key="reg_password")
-                    reg_confirm = st.text_input("Confirmar contraseña", type="password", placeholder="******", key="reg_confirm")
-                    submit_reg = st.form_submit_button("Registrarse", use_container_width=True)
-                    
-                    if submit_reg:
-                        if not reg_email or not reg_name or not reg_password or not reg_confirm:
-                            st.error("Por favor complete todos los campos.")
-                        elif reg_password != reg_confirm:
-                            st.error("Las contraseñas no coinciden.")
-                        elif len(reg_password) < 6:
-                            st.error("La contraseña debe tener al menos 6 caracteres.")
-                        else:
-                            with st.spinner("Registrando cuenta..."):
-                                if register(reg_email, reg_password, reg_name):
-                                    st.rerun()
+            with st.form("login_form", clear_on_submit=False):
+                st.subheader("Iniciar Sesión")
+                email = st.text_input("Correo electrónico", placeholder="admin@gnb.com", key="login_email")
+                password = st.text_input("Contraseña", type="password", placeholder="******", key="login_password")
+                submit = st.form_submit_button("Entrar", use_container_width=True)
+                
+                if submit:
+                    if not email or not password:
+                        st.error("Por favor complete todos los campos.")
+                    else:
+                        with st.spinner("Autenticando..."):
+                            if login(email, password):
+                                st.success("¡Acceso concedido!")
+                                st.rerun()
                                     
         st.stop()
         

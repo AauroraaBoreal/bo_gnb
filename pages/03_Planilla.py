@@ -142,10 +142,11 @@ def save_matrix_changes():
             calculate_employee_totals(entry_id)
             
     if updated_any:
-        calculate_payroll_totals(st.session_state["active_period_id"])
-        # Clear edited_rows to reset any None states and force editor to render fresh df_matrix
-        if f"payroll_matrix_editor_{version}" in st.session_state:
-            st.session_state[f"payroll_matrix_editor_{version}"]["edited_rows"] = {}
+        period_id = st.session_state.get("active_period_id")
+        if period_id:
+            calculate_payroll_totals(period_id)
+        # Increment version to force data_editor to re-render cleanly with new key and fresh DB data
+        st.session_state["matrix_editor_version"] = version + 1
 
 def save_payments_changes():
     version = st.session_state.get("payments_editor_version", 0)
@@ -238,10 +239,11 @@ def save_payments_changes():
             updated_any = True
             
     if updated_any:
-        calculate_payroll_totals(st.session_state["active_period_id"])
-        # Clear edited_rows to reset any None states and force editor to render fresh df_pay
-        if f"payroll_payments_editor_{version}" in st.session_state:
-            st.session_state[f"payroll_payments_editor_{version}"]["edited_rows"] = {}
+        period_id = st.session_state.get("active_period_id")
+        if period_id:
+            calculate_payroll_totals(period_id)
+        # Increment version to force data_editor to re-render cleanly with new key and fresh DB data
+        st.session_state["payments_editor_version"] = version + 1
 
 # Fetch all periods to populate selectors
 try:
@@ -1318,9 +1320,10 @@ with tab_attendance:
                                 calculate_payroll_totals(photo_period_id)
                                 
                                 st.success(f"¡Asistencia de {parsed_day.upper()} aplicada y guardada correctamente!")
-                                # Clear results from state
+                                # Clear results from state and increment matrix editor version
                                 del st.session_state["attendance_parsed_results"]
                                 del st.session_state["attendance_parsed_day"]
+                                st.session_state["matrix_editor_version"] = st.session_state.get("matrix_editor_version", 0) + 1
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Error al guardar asistencia: {str(e)}")
