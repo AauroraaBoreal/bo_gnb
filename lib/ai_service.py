@@ -3,6 +3,10 @@ import json
 import time
 import requests
 
+LAST_WORKING_MODEL = None
+LAST_WORKING_MODEL_TIME = 0
+MODEL_CACHE_TTL = 600  # 10 minutes in seconds
+
 def get_available_gemini_models(api_key: str) -> list:
     """
     Queries the Gemini API to get all available vision/text generation models for the key.
@@ -20,7 +24,7 @@ def get_available_gemini_models(api_key: str) -> list:
     ]
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             fetched = []
@@ -49,7 +53,6 @@ def get_available_gemini_models(api_key: str) -> list:
                     return s
                 
                 fetched.sort(key=sort_priority)
-                # Combine fetched with default fallbacks ensuring no duplicates
                 combined = []
                 for m in fetched + default_models:
                     if m not in combined:
@@ -64,8 +67,10 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
     """
     Sends the handwritten attendance sheet image to the Gemini API
     using HTTP POST requests to perform OCR and structure the results.
-    Includes retries and model fallbacks if Google returns HTTP 503 (High Demand), 429, or 404.
+    Caches the last working model for 10 minutes to ensure fast execution.
     """
+    global LAST_WORKING_MODEL, LAST_WORKING_MODEL_TIME
+    
     api_key = api_key.strip()
     
     # Base64 encode the image
@@ -115,7 +120,17 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
     Asegúrate de procesar todos los nombres legibles en la imagen. Si hay un nombre en la imagen que no puedes emparejar con ninguno de la lista oficial, inclúyelo en la lista con el "employee_name" como el nombre original de la foto y añade una nota explicativa o déjalo para que el usuario lo asocie manualmente.
     """
     
-    candidate_models = get_available_gemini_models(api_key)
+    now = time.time()
+    all_models = get_available_gemini_models(api_key)
+    
+    # Check if we have a cached working model within the 10-minute (600s) TTL
+    if LAST_WORKING_MODEL and (now - LAST_WORKING_MODEL_TIME) < MODEL_CACHE_TTL:
+        # Prioritize the cached working model first
+        candidate_models = [LAST_WORKING_MODEL] + [m for m in all_models if m != LAST_WORKING_MODEL]
+    else:
+        # Cache expired or not set, evaluate models starting from primary list
+        candidate_models = all_models
+        
     headers = {"Content-Type": "application/json"}
     last_error_msg = ""
     
@@ -164,10 +179,10 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
             "generationConfig": generation_config
         }
         
-        max_retries = 2
+        max_retries = 1
         for attempt in range(max_retries + 1):
             try:
-                response = requests.post(url, json=payload, headers=headers, timeout=60)
+                response = requests.post(url, json=payload, headers=headers, timeout=30)
                 if response.status_code == 200:
                     res_json = response.json()
                     try:
@@ -179,6 +194,10 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
                             elif lines[0].startswith("```"):
                                 text_content = "\n".join(lines[1:-1])
                         data = json.loads(text_content)
+                        
+                        # Cache the working model and update timestamp
+                        LAST_WORKING_MODEL = model_name
+                        LAST_WORKING_MODEL_TIME = time.time()
                         return data
                     except (KeyError, IndexError, json.JSONDecodeError) as e:
                         raise ValueError(f"Error al decodificar la respuesta de Gemini ({model_name}): {str(e)}. Respuesta cruda: {response.text}")
@@ -186,7 +205,7 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
                 if response.status_code in (503, 429):
                     last_error_msg = f"HTTP {response.status_code} ({model_name}): {response.text}"
                     if attempt < max_retries:
-                        time.sleep(2 * (attempt + 1))
+                        time.sleep(1)
                         continue
                     else:
                         break
@@ -201,7 +220,7 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
             except requests.exceptions.RequestException as req_err:
                 last_error_msg = f"Error de red ({model_name}): {str(req_err)}"
                 if attempt < max_retries:
-                    time.sleep(2)
+                    time.sleep(1)
                     continue
                 break
                 
