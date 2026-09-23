@@ -1,14 +1,15 @@
 import base64
 import json
+import time
 import requests
 
 def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: list, api_key: str) -> dict:
     """
-    Sends the handwritten attendance sheet image to the Gemini API (gemini-3.5-flash)
+    Sends the handwritten attendance sheet image to the Gemini API
     using HTTP POST requests to perform OCR and structure the results.
+    Includes retries and model fallbacks if Google returns HTTP 503 (High Demand) or 429.
     """
     api_key = api_key.strip()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={api_key}"
     
     # Base64 encode the image
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -57,26 +58,22 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
     Asegúrate de procesar todos los nombres legibles en la imagen. Si hay un nombre en la imagen que no puedes emparejar con ninguno de la lista oficial, inclúyelo en la lista con el "employee_name" como el nombre original de la foto y añade una nota explicativa o déjalo para que el usuario lo asocie manualmente.
     """
     
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": prompt},
-                    {
-                        "inlineData": {
-                            "mimeType": mime_type,
-                            "data": image_b64
-                        }
-                    }
-                ]
-            }
-        ],
-        "generationConfig": {
+    candidate_models = [
+        "gemini-2.5-flash",
+        "gemini-1.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-pro"
+    ]
+    
+    headers = {"Content-Type": "application/json"}
+    last_error_msg = ""
+    
+    for model_name in candidate_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        
+        generation_config = {
             "responseMimeType": "application/json",
             "maxOutputTokens": 8192,
-            "thinkingConfig": {
-                "thinkingBudget": 0
-            },
             "responseSchema": {
                 "type": "OBJECT",
                 "properties": {
@@ -98,43 +95,67 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
                 "required": ["attendance"]
             }
         }
-    }
-    
-    headers = {"Content-Type": "application/json"}
-    
-    response = requests.post(url, json=payload, headers=headers)
-    try:
-        response.raise_for_status()
-    except requests.exceptions.HTTPError as http_err:
-        if response.status_code == 404:
+        
+        if "2.5" in model_name:
+            generation_config["thinkingConfig"] = {"thinkingBudget": 0}
+            
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "inlineData": {
+                                "mimeType": mime_type,
+                                "data": image_b64
+                            }
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": generation_config
+        }
+        
+        max_retries = 2
+        for attempt in range(max_retries + 1):
             try:
-                list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-                list_resp = requests.get(list_url)
-                if list_resp.status_code == 200:
-                    models_data = list_resp.json()
-                    available_models = [m["name"].split("/")[-1] for m in models_data.get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])]
-                    raise ValueError(
-                        f"Error HTTP 404: El modelo solicitado no se encontró o no está disponible. "
-                        f"Los modelos disponibles en tu cuenta para generación de contenido son: {available_models}. "
-                        f"Detalle: {response.text}"
-                    )
-            except ValueError:
-                raise
-            except Exception:
-                pass
-        raise ValueError(f"Error HTTP {response.status_code}: {response.text}")
-    
-    res_json = response.json()
-    try:
-        text_content = res_json["candidates"][0]["content"]["parts"][0]["text"]
-        # Clean markdown code block wraps if the model returned them despite instructions
-        if text_content.startswith("```"):
-            lines = text_content.splitlines()
-            if lines[0].startswith("```json"):
-                text_content = "\n".join(lines[1:-1])
-            elif lines[0].startswith("```"):
-                text_content = "\n".join(lines[1:-1])
-        data = json.loads(text_content)
-        return data
-    except (KeyError, IndexError, json.JSONDecodeError) as e:
-        raise ValueError(f"Error al decodificar la respuesta de Gemini: {str(e)}. Respuesta cruda: {response.text}")
+                response = requests.post(url, json=payload, headers=headers, timeout=60)
+                if response.status_code == 200:
+                    res_json = response.json()
+                    try:
+                        text_content = res_json["candidates"][0]["content"]["parts"][0]["text"]
+                        if text_content.startswith("```"):
+                            lines = text_content.splitlines()
+                            if lines[0].startswith("```json"):
+                                text_content = "\n".join(lines[1:-1])
+                            elif lines[0].startswith("```"):
+                                text_content = "\n".join(lines[1:-1])
+                        data = json.loads(text_content)
+                        return data
+                    except (KeyError, IndexError, json.JSONDecodeError) as e:
+                        raise ValueError(f"Error al decodificar la respuesta de Gemini ({model_name}): {str(e)}. Respuesta cruda: {response.text}")
+                
+                if response.status_code in (503, 429):
+                    last_error_msg = f"HTTP {response.status_code} ({model_name}): {response.text}"
+                    if attempt < max_retries:
+                        time.sleep(2 * (attempt + 1))
+                        continue
+                    else:
+                        break
+                
+                if response.status_code == 404:
+                    last_error_msg = f"HTTP 404 ({model_name}): Modelo no disponible."
+                    break
+                    
+                last_error_msg = f"Error HTTP {response.status_code} ({model_name}): {response.text}"
+                break
+                
+            except requests.exceptions.RequestException as req_err:
+                last_error_msg = f"Error de red ({model_name}): {str(req_err)}"
+                if attempt < max_retries:
+                    time.sleep(2)
+                    continue
+                break
+                
+    raise ValueError(f"Servicio de IA temporalmente saturado en Google. Último detalle: {last_error_msg}")
+
