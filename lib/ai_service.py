@@ -3,11 +3,68 @@ import json
 import time
 import requests
 
+def get_available_gemini_models(api_key: str) -> list:
+    """
+    Queries the Gemini API to get all available vision/text generation models for the key.
+    Returns a sorted list prioritizing stable flash and pro models.
+    """
+    default_models = [
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-8b",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash-exp",
+        "gemini-1.5-pro",
+        "gemini-2.5-pro"
+    ]
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            fetched = []
+            for m in data.get("models", []):
+                name = m.get("name", "").replace("models/", "")
+                methods = m.get("supportedGenerationMethods", [])
+                if "generateContent" in methods and "gemini" in name.lower() and not any(x in name.lower() for x in ["embedding", "aqa", "imagen", "tts", "bison"]):
+                    fetched.append(name)
+            
+            if fetched:
+                # Prioritize flash models first, then pro models
+                def sort_priority(n):
+                    s = 100
+                    if "flash" in n:
+                        s -= 50
+                    if "2.0" in n:
+                        s -= 20
+                    elif "2.5" in n:
+                        s -= 15
+                    elif "1.5" in n:
+                        s -= 10
+                    if "lite" in n or "8b" in n:
+                        s += 5
+                    if "exp" in n or "preview" in n:
+                        s += 10
+                    return s
+                
+                fetched.sort(key=sort_priority)
+                # Combine fetched with default fallbacks ensuring no duplicates
+                combined = []
+                for m in fetched + default_models:
+                    if m not in combined:
+                        combined.append(m)
+                return combined
+    except Exception:
+        pass
+        
+    return default_models
+
 def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: list, api_key: str) -> dict:
     """
     Sends the handwritten attendance sheet image to the Gemini API
     using HTTP POST requests to perform OCR and structure the results.
-    Includes retries and model fallbacks if Google returns HTTP 503 (High Demand) or 429.
+    Includes retries and model fallbacks if Google returns HTTP 503 (High Demand), 429, or 404.
     """
     api_key = api_key.strip()
     
@@ -58,13 +115,7 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
     Asegúrate de procesar todos los nombres legibles en la imagen. Si hay un nombre en la imagen que no puedes emparejar con ninguno de la lista oficial, inclúyelo en la lista con el "employee_name" como el nombre original de la foto y añade una nota explicativa o déjalo para que el usuario lo asocie manualmente.
     """
     
-    candidate_models = [
-        "gemini-2.5-flash",
-        "gemini-1.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-pro"
-    ]
-    
+    candidate_models = get_available_gemini_models(api_key)
     headers = {"Content-Type": "application/json"}
     last_error_msg = ""
     
@@ -96,9 +147,6 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
             }
         }
         
-        if "2.5" in model_name:
-            generation_config["thinkingConfig"] = {"thinkingBudget": 0}
-            
         payload = {
             "contents": [
                 {
@@ -158,4 +206,5 @@ def parse_attendance_image(image_bytes: bytes, mime_type: str, employee_names: l
                 break
                 
     raise ValueError(f"Servicio de IA temporalmente saturado en Google. Último detalle: {last_error_msg}")
+
 
